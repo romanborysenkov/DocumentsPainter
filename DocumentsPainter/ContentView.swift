@@ -1,132 +1,40 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
-import ZIPFoundation
 import Foundation
 
-enum DrawingStyle: String, CaseIterable, Identifiable {
-    case solid = "Суцільна"
-    case dashed = "Пунктир"
-    case dotted = "Крапки"
-    var id: String { rawValue }
-}
-
-enum DrawingToolKind: String, CaseIterable, Identifiable {
-    case pencil
-    case pen
-    case marker
-    case eraser
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .pencil: return "Олівець"
-        case .pen: return "Ручка"
-        case .marker: return "Маркер"
-        case .eraser: return "Гумка"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .pencil: return "pencil"
-        case .pen: return "pencil.tip"
-        case .marker: return "highlighter"
-        case .eraser: return "eraser"
-        }
-    }
-
-    var defaultWidth: CGFloat {
-        switch self {
-        case .pencil: return 3
-        case .pen: return 5
-        case .marker: return 12
-        case .eraser: return 18
-        }
-    }
-
-    var opacity: Double {
-        switch self {
-        case .marker: return 0.35
-        default: return 1
-        }
-    }
-}
-
-enum InteractionMode: String, CaseIterable, Identifiable {
-    case draw = "Малювання"
-    case text = "Текст"
-    var id: String { rawValue }
-}
-
-struct StrokeItem {
-    var points: [CGPoint]
-    var color: Color
-    var width: CGFloat
-    var style: DrawingStyle
-    var opacity: Double
-}
-
-struct ImportedTextLine: Identifiable {
-    var id: UUID = UUID()
-    var documentId: UUID = UUID()
-    var groupId: UUID = UUID()
-    var order: Int = 0
-    var text: String
-    var position: CGPoint
-    var fontSize: CGFloat
-    var color: Color
-}
-
-extension ImportedTextLine {
-    func split(at range: NSRange) -> (left: ImportedTextLine?, selected: ImportedTextLine?, right: ImportedTextLine?) {
-        let nsText = text as NSString
-        let length = nsText.length
-        guard range.location >= 0, range.length >= 0, range.location + range.length <= length else {
-            return (self, nil, nil)
-        }
-        let leftText = nsText.substring(to: range.location)
-        let selectedText = nsText.substring(with: range)
-        let rightText = nsText.substring(from: range.location + range.length)
-
-        let font = UIFont.systemFont(ofSize: fontSize)
-        let leftWidth = (leftText as NSString).size(withAttributes: [.font: font]).width
-        let selectedWidth = (selectedText as NSString).size(withAttributes: [.font: font]).width
-        let spacing = max(8, fontSize * 0.6)
-
-        let left = leftText.isEmpty ? nil : ImportedTextLine(
-            id: UUID(), documentId: documentId, groupId: groupId, order: order, text: leftText,
-            position: position, fontSize: fontSize, color: color
-        )
-        let selected = selectedText.isEmpty ? nil : ImportedTextLine(
-            id: UUID(), documentId: documentId, groupId: groupId, order: order + 1, text: selectedText,
-            position: CGPoint(x: position.x + leftWidth + spacing, y: position.y), fontSize: fontSize, color: color
-        )
-        let right = rightText.isEmpty ? nil : ImportedTextLine(
-            id: UUID(), documentId: documentId, groupId: groupId, order: order + 2, text: rightText,
-            position: CGPoint(x: position.x + leftWidth + selectedWidth + spacing * 2, y: position.y), fontSize: fontSize, color: color
-        )
-        return (left, selected, right)
-    }
-}
-
-private struct CanvasSnapshot {
-    var strokes: [StrokeItem]
-    var importedTextLines: [ImportedTextLine]
-}
-
 struct ContentView: View {
+    let projectId: UUID
+
+    private var projectStore: CanvasProjectStore { CanvasProjectStore.shared }
+    private let autoSaveTimer = Timer.publish(every: 1.2, on: .main, in: .common).autoconnect()
+
+    @State private var projectTitle: String = ""
+
     @State private var scale: CGFloat = 1
     @State private var offset: CGSize = .zero
 
     @State private var currentStroke: [CGPoint] = []
     @State private var strokes: [StrokeItem] = []
+    @State private var hiddenStrokeIds: Set<UUID> = []
 
     @State private var importedTextLines: [ImportedTextLine] = []
+    @State private var hiddenTextLineIds: Set<UUID> = []
+    @State private var layerGroups: [LayerGroup] = []
+    @State private var selectedLayerIdsForGrouping: Set<String> = []
+    @State private var customLayerNames: [String: String] = [:]
     @State private var selectedTextLineId: UUID?
     @State private var selectedTextLineIds: Set<UUID> = []
+    @State private var selectedCanvasItem: SelectedCanvasItem?
+    @State private var selectedCanvasLayerIds: Set<String> = []
     @State private var draggingTextLineId: UUID?
+    @State private var draggingStrokeId: UUID?
+    @State private var resizingCanvasItem = false
+    @State private var cursorSelectionStartPoint: CGPoint?
+    @State private var cursorSelectionRect: CGRect?
+    @State private var cursorPencilDragging = false
+    @State private var cursorPencilResizing = false
+    @State private var lastCursorPencilPointInView: CGPoint?
 
     @State private var editingTextLineId: UUID?
     @State private var editingTextLineText = ""
@@ -157,254 +65,62 @@ struct ContentView: View {
 
     @State private var showImportPicker = false
     @State private var searchQuery = ""
-
+    @State private var toolDockPlacement: ToolDockPlacement = .bottom
     private let minScale: CGFloat = 0.2
     private let maxScale: CGFloat = 8
     private let virtualCanvasSize: CGFloat = 120000
     private let paletteColors: [Color] = [.black, .blue, .green, .yellow, .red]
+    /// Ліва колонка: інструменти (2 ряди) + слої; ширина контенту карток.
+    private let toolDockLeftSidebarWidth: CGFloat = 296
+    private let toolDockLeftOuterLeading: CGFloat = 12
+    private let toolDockLeftGapToCanvas: CGFloat = 10
+    private var toolDockLeftColumnTotalWidth: CGFloat {
+        toolDockLeftOuterLeading + toolDockLeftSidebarWidth + toolDockLeftGapToCanvas
+    }
+    private let toolDockBottomHeight: CGFloat = 220
     private static let docxUTType: UTType = UTType("org.openxmlformats.wordprocessingml.document")
         ?? UTType(filenameExtension: "docx")
         ?? .data
 
     var body: some View {
         GeometryReader { geo in
-            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            editorRoot(geo: geo)
+        }
+    }
 
-            ZStack {
-                Color.white.ignoresSafeArea()
+    @ViewBuilder
+    private func editorRoot(geo: GeometryProxy) -> some View {
+        mainEditorContent(geo: geo)
+    }
 
-                Canvas { context, _ in
-                    let virtualRect = CGRect(
-                        x: center.x - (virtualCanvasSize / 2) * scale + offset.width,
-                        y: center.y - (virtualCanvasSize / 2) * scale + offset.height,
-                        width: virtualCanvasSize * scale,
-                        height: virtualCanvasSize * scale
+    @ViewBuilder
+    private func mainEditorContent(geo: GeometryProxy) -> some View {
+        Group {
+            if toolDockPlacement == .leading {
+                HStack(alignment: .top, spacing: toolDockLeftGapToCanvas) {
+                    leadingSidebarColumn(canvasHeight: geo.size.height)
+                        .padding(.leading, toolDockLeftOuterLeading)
+                        .padding(.top, 8)
+                    canvasStack(
+                        size: CGSize(width: max(1, geo.size.width - toolDockLeftColumnTotalWidth), height: geo.size.height)
                     )
-                    context.fill(Path(virtualRect), with: .color(.white))
-                    context.stroke(Path(virtualRect), with: .color(.gray.opacity(0.08)), lineWidth: 1)
-
-                    for stroke in strokes {
-                        guard stroke.points.count > 1 else { continue }
-                        var path = Path()
-                        path.move(to: contentToView(stroke.points[0]))
-                        for p in stroke.points.dropFirst() { path.addLine(to: contentToView(p)) }
-                        context.stroke(
-                            path,
-                            with: .color(stroke.color.opacity(stroke.opacity)),
-                            style: strokeStyle(for: stroke.style, width: stroke.width * scale)
-                        )
-                    }
-
-                    if currentStroke.count > 1 {
-                        var path = Path()
-                        path.move(to: contentToView(currentStroke[0]))
-                        for p in currentStroke.dropFirst() { path.addLine(to: contentToView(p)) }
-                        context.stroke(
-                            path,
-                            with: .color(drawingColor.opacity(drawingOpacity)),
-                            style: strokeStyle(for: drawingStyle, width: drawingWidth * scale)
-                        )
-                    }
-
-                    for line in importedTextLines {
-                        let matches = searchRanges(in: line.text, query: searchQuery)
-                        for m in matches {
-                            let startX = textWidthPrefix(line.text, length: m.location, fontSize: line.fontSize)
-                            let endX = textWidthPrefix(line.text, length: m.location + m.length, fontSize: line.fontSize)
-                            let contentRect = CGRect(x: line.position.x + startX, y: line.position.y, width: max(1, endX - startX), height: line.fontSize * 1.3)
-                            let o = contentToView(CGPoint(x: contentRect.minX, y: contentRect.minY))
-                            let vr = CGRect(x: o.x, y: o.y, width: contentRect.width * scale, height: contentRect.height * scale)
-                            context.fill(Path(roundedRect: vr.insetBy(dx: -1, dy: -1), cornerRadius: 3), with: .color(.yellow.opacity(0.45)))
-                        }
-
-                        context.draw(
-                            Text(line.text).font(.system(size: line.fontSize * scale)).foregroundColor(line.color),
-                            at: contentToView(line.position),
-                            anchor: .topLeading
-                        )
-                    }
-
-                    for line in importedTextLines where selectedTextLineIds.contains(line.id) {
-                        let b = boundsForTextLine(line)
-                        let o = contentToView(CGPoint(x: b.minX, y: b.minY))
-                        let vr = CGRect(x: o.x, y: o.y, width: b.width * scale, height: b.height * scale)
-                        context.stroke(Path(roundedRect: vr.insetBy(dx: -4, dy: -4), cornerRadius: 4), with: .color(.blue), style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
-                    }
-
-                    if let rect = textSelectionRect {
-                        let o = contentToView(CGPoint(x: rect.minX, y: rect.minY))
-                        let vr = CGRect(x: o.x, y: o.y, width: rect.width * scale, height: rect.height * scale)
-                        let path = Path(roundedRect: vr, cornerRadius: 2)
-                        context.fill(path, with: .color(.blue.opacity(0.08)))
-                        context.stroke(path, with: .color(.blue), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                    }
                 }
-
-                TouchSurfaceView(
-                    onPencilBegan: { p in
-                        if interactionMode == .draw {
-                            if drawingTool == .eraser {
-                                pushUndoSnapshot()
-                                hasCapturedEraseUndo = true
-                                _ = eraseStrokes(at: viewToContent(p))
-                                currentStroke = []
-                            } else {
-                                currentStroke = [viewToContent(p)]
-                            }
-                            return
-                        }
-                        guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
-                        let cp = viewToContent(p)
-                        if let hit = textLineAt(contentPoint: cp), selectedTextLineIds.contains(hit.id), !selectedTextLineIds.isEmpty {
-                            pencilDraggingTextSelection = true
-                            lastPencilPointInView = p
-                            hasCapturedTextDragUndo = false
-                        } else {
-                            pencilDraggingTextSelection = false
-                            textSelectionStartPoint = cp
-                            textSelectionRect = CGRect(origin: cp, size: .zero)
-                            selectedTextLineId = nil
-                            selectedTextLineIds = []
-                        }
-                    },
-                    onSingleTap: { p in
-                        guard interactionMode == .text, editingTextLineId == nil else { return }
-                        if let line = textLineAt(contentPoint: viewToContent(p)) {
-                            selectedTextLineId = line.id
-                            selectedTextLineIds = [line.id]
-                        } else {
-                            selectedTextLineId = nil
-                            selectedTextLineIds = []
-                        }
-                    },
-                    onDoubleTap: { p in
-                        guard interactionMode == .text else { return }
-                        let cp = viewToContent(p)
-                        if let line = textLineAt(contentPoint: cp) {
-                            selectedTextLineIds = [line.id]
-                            splitWordFromDoubleTap(at: cp, in: line)
-                        }
-                    },
-                    onPencilDoubleTap: { p in
-                        guard interactionMode == .text, editingTextLineId == nil else { return }
-                        let cp = viewToContent(p)
-                        if let line = textLineAt(contentPoint: cp) {
-                            selectedTextLineId = line.id
-                            selectedTextLineIds = [line.id]
-                            startEditingSelectedTextLine()
-                        } else {
-                            startComposingNewText(at: cp)
-                        }
-                    },
-                    onPencilMoved: { p in
-                        if interactionMode == .draw {
-                            if drawingTool == .eraser {
-                                _ = eraseStrokes(at: viewToContent(p))
-                            } else {
-                                currentStroke.append(viewToContent(p))
-                            }
-                            return
-                        }
-                        guard interactionMode == .text else { return }
-                        if pencilDraggingTextSelection {
-                            guard let last = lastPencilPointInView else { return }
-                            if !hasCapturedTextDragUndo { pushUndoSnapshot(); hasCapturedTextDragUndo = true }
-                            let dx = (p.x - last.x) / scale
-                            let dy = (p.y - last.y) / scale
-                            for i in importedTextLines.indices where selectedTextLineIds.contains(importedTextLines[i].id) {
-                                importedTextLines[i].position = CGPoint(x: importedTextLines[i].position.x + dx, y: importedTextLines[i].position.y + dy)
-                            }
-                            lastPencilPointInView = p
-                        } else if let start = textSelectionStartPoint {
-                            let c = viewToContent(p)
-                            textSelectionRect = CGRect(x: min(start.x, c.x), y: min(start.y, c.y), width: abs(c.x - start.x), height: abs(c.y - start.y))
-                        }
-                    },
-                    onPencilEnded: {
-                        if interactionMode == .draw {
-                            if drawingTool == .eraser { hasCapturedEraseUndo = false; return }
-                            if currentStroke.count > 1 {
-                                pushUndoSnapshot()
-                                strokes.append(StrokeItem(points: currentStroke, color: drawingColor, width: drawingWidth, style: drawingStyle, opacity: drawingOpacity))
-                            }
-                            currentStroke = []
-                            return
-                        }
-                        guard interactionMode == .text else { return }
-                        if pencilDraggingTextSelection {
-                            pencilDraggingTextSelection = false
-                            lastPencilPointInView = nil
-                            hasCapturedTextDragUndo = false
-                            return
-                        }
-                        defer { textSelectionStartPoint = nil; textSelectionRect = nil }
-                        guard let rect = textSelectionRect, rect.width > 3, rect.height > 3 else { return }
-                        selectTextFragments(in: rect)
-                    },
-                    onFingerPanBegan: { p in
-                        guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
-                        if let hit = textLineAt(contentPoint: viewToContent(p)) {
-                            if selectedTextLineIds.contains(hit.id) {
-                                draggingTextLineId = hit.id
-                            } else {
-                                selectedTextLineId = hit.id
-                                selectedTextLineIds = [hit.id]
-                                draggingTextLineId = hit.id
-                            }
-                            hasCapturedTextDragUndo = false
-                        }
-                    },
-                    onFingerPanChanged: { t in
-                        if interactionMode == .draw {
-                            offset = CGSize(width: offset.width + t.width, height: offset.height + t.height)
-                            return
-                        }
-                        guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
-                        if let dragId = draggingTextLineId, importedTextLines.contains(where: { $0.id == dragId }) {
-                            if !hasCapturedTextDragUndo { pushUndoSnapshot(); hasCapturedTextDragUndo = true }
-                            let dx = t.width / scale
-                            let dy = t.height / scale
-                            for i in importedTextLines.indices where selectedTextLineIds.contains(importedTextLines[i].id) {
-                                importedTextLines[i].position = CGPoint(x: importedTextLines[i].position.x + dx, y: importedTextLines[i].position.y + dy)
-                            }
-                        } else {
-                            offset = CGSize(width: offset.width + t.width, height: offset.height + t.height)
-                        }
-                    },
-                    onFingerPanEnded: {
-                        draggingTextLineId = nil
-                        hasCapturedTextDragUndo = false
-                    },
-                    onTwoFingerPanChanged: { t in
-                        offset = CGSize(width: offset.width + t.width, height: offset.height + t.height)
-                    },
-                    onPinchChanged: { s, c in
-                        if !currentStroke.isEmpty { currentStroke = [] }
-                        let newScale = (scale * s).clamped(to: minScale...maxScale)
-                        offset = CGSize(
-                            width: c.x * (1 - newScale / scale) + offset.width * (newScale / scale),
-                            height: c.y * (1 - newScale / scale) + offset.height * (newScale / scale)
-                        )
-                        scale = newScale
-                    }
-                )
+            } else {
+                VStack(spacing: 0) {
+                    canvasStack(
+                        size: CGSize(width: geo.size.width, height: max(1, geo.size.height - toolDockBottomHeight))
+                    )
+                    fixedToolDockPanel(canvasSize: geo.size)
+                }
             }
-            .overlay(alignment: .topTrailing) { fileAndSearchPanel.padding(12) }
-            .overlay(alignment: .bottom) {
-                VStack(spacing: 10) {
-                    bottomToolDock
-
-                    if interactionMode == .text, !selectedTextLineIds.isEmpty, editingTextLineId == nil {
-                        HStack(spacing: 12) {
-                            Button("Редагувати") { if selectedTextLineIds.count == 1 { startEditingSelectedTextLine() } }
-                                .disabled(selectedTextLineIds.count != 1)
-                            Button("Видалити", role: .destructive) { deleteSelectedTextLine() }
-                        }
-                        .padding(12)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    }
+        }
+            .coordinateSpace(name: EditorCanvasCoordinateSpace.name)
+            .overlay(alignment: .topTrailing) { importButton.padding(.top, 12).padding(.trailing, 12) }
+            .overlay(alignment: .topTrailing) { searchPanel.padding(.top, 64).padding(.trailing, 12) }
+            .overlay(alignment: .topLeading) {
+                if toolDockPlacement != .leading {
+                    layersPanel(embedded: false).padding(12)
                 }
-                .padding(.bottom, 24)
             }
             .overlay { if editingTextLineId != nil { editTextLineOverlay(size: geo.size) } }
             .overlay { if isComposingNewText { composingTextInlineOverlay(size: geo.size) } }
@@ -412,216 +128,492 @@ struct ContentView: View {
                 guard case .success(let urls) = result, let url = urls.first else { return }
                 importDOCX(from: url)
             }
+            .onAppear {
+                if let meta = projectStore.metadata(for: projectId) {
+                    projectTitle = meta.title
+                }
+                loadCanvasStateIfNeeded()
+            }
+            .onChange(of: scale) { _ in saveCanvasState() }
+            .onChange(of: offset) { _ in saveCanvasState() }
+            .onChange(of: hiddenStrokeIds) { _ in saveCanvasState() }
+            .onChange(of: hiddenTextLineIds) { _ in saveCanvasState() }
+            .onChange(of: customLayerNames) { _ in saveCanvasState() }
+            .onChange(of: toolDockPlacement) { _ in saveCanvasState() }
+            .onReceive(autoSaveTimer) { _ in saveCanvasState() }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    TextField("Назва", text: $projectTitle)
+                        .multilineTextAlignment(.center)
+                        .submitLabel(.done)
+                        .onSubmit { projectStore.renameProject(id: projectId, title: projectTitle) }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        Picker("Панель інструментів", selection: $toolDockPlacement) {
+                            Label("Зліва (інструменти і слої)", systemImage: "rectangle.lefthalf.filled").tag(ToolDockPlacement.leading)
+                            Label("Знизу (горизонтально)", systemImage: "rectangle.bottomhalf.filled").tag(ToolDockPlacement.bottom)
+                        }
+                    } label: {
+                        Image(systemName: toolDockPlacement == .leading ? "sidebar.left" : "rectangle.bottomhalf.filled")
+                    }
+                }
+            }
+            .onDisappear {
+                projectStore.renameProject(id: projectId, title: projectTitle)
+                saveCanvasState()
+            }
+    }
+
+    private func canvasStack(size: CGSize) -> some View {
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        return ZStack {
+            Color.white
+            editorDrawingCanvas(center: center)
+            editorTouchSurface()
+        }
+        .frame(width: size.width, height: size.height)
+        .clipped()
+    }
+
+    @ViewBuilder
+    private func leadingSidebarColumn(canvasHeight: CGFloat) -> some View {
+        let toolChrome = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let layersChrome = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let toolInnerW = toolDockLeftSidebarWidth - 20
+        VStack(alignment: .leading, spacing: 12) {
+            toolDockContent(
+                dockFrameSize: CGSize(width: toolInnerW, height: 200),
+                placement: .leading
+            )
+            .padding(10)
+            .frame(width: toolDockLeftSidebarWidth - 4, alignment: .topLeading)
+            .background { toolChrome.fill(Material.ultraThinMaterial) }
+            .overlay { toolChrome.stroke(Color.black.opacity(0.08), lineWidth: 1) }
+            .shadow(color: Color.black.opacity(0.1), radius: 12, x: 4, y: 4)
+
+            layersPanel(embedded: true)
+                .padding(10)
+                .frame(width: toolDockLeftSidebarWidth - 4, alignment: .topLeading)
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .background { layersChrome.fill(Material.ultraThinMaterial) }
+                .overlay { layersChrome.stroke(Color.black.opacity(0.08), lineWidth: 1) }
+                .shadow(color: Color.black.opacity(0.08), radius: 10, x: 3, y: 3)
+        }
+        .frame(width: toolDockLeftSidebarWidth, height: canvasHeight, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func fixedToolDockPanel(canvasSize: CGSize) -> some View {
+        let bottomShape = UnevenRoundedRectangle(
+            cornerRadii: .init(topLeading: 18, bottomLeading: 0, bottomTrailing: 0, topTrailing: 18),
+            style: .continuous
+        )
+        toolDockContent(
+            dockFrameSize: CGSize(width: canvasSize.width, height: toolDockBottomHeight),
+            placement: .bottom
+        )
+        .padding(8)
+        .frame(width: canvasSize.width, height: toolDockBottomHeight, alignment: .top)
+        .background {
+            bottomShape.fill(Material.ultraThinMaterial)
+        }
+        .overlay {
+            bottomShape.stroke(Color.black.opacity(0.08), lineWidth: 1)
         }
     }
 
-    private var bottomToolDock: some View {
-        HStack(spacing: 10) {
-            /*Picker("Режим", selection: $interactionMode) {
-                ForEach(InteractionMode.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 170)*/
-
-            Divider()
-                .frame(height: 36)
-
-            Button { undo() } label: {
-                Image(systemName: "arrow.uturn.backward")
-                    .font(.system(size: 20, weight: .medium))
-                    .frame(width: 42, height: 42)
-                    .background(Circle().fill(Color(UIColor.systemBackground).opacity(0.72)))
-            }
-            .buttonStyle(.plain)
-            .disabled(undoStack.isEmpty)
-            .opacity(undoStack.isEmpty ? 0.45 : 1)
-            .accessibilityLabel("Скасувати")
-
-            Button { redo() } label: {
-                Image(systemName: "arrow.uturn.forward")
-                    .font(.system(size: 20, weight: .medium))
-                    .frame(width: 42, height: 42)
-                    .background(Circle().fill(Color(UIColor.systemBackground).opacity(0.72)))
-            }
-            .buttonStyle(.plain)
-            .disabled(redoStack.isEmpty)
-            .opacity(redoStack.isEmpty ? 0.45 : 1)
-            .accessibilityLabel("Повторити")
-
-            Divider()
-                .frame(height: 36)
-
-            Button {
-                interactionMode = .text
-            } label: {
-                VStack(spacing: 4) {
-                    Image(systemName: "text.cursor")
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundStyle(interactionMode == .text ? Color.accentColor : Color.primary)
-                        .frame(width: 46, height: 46)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(interactionMode == .text ? Color.accentColor.opacity(0.13) : Color(UIColor.systemBackground).opacity(0.7))
-                        )
-                    Image(systemName: "triangle.fill")
-                        .font(.system(size: 7))
-                        .foregroundStyle(interactionMode == .text ? Color.accentColor : .clear)
-                        .offset(y: 1)
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Текст")
-
-            ForEach(DrawingToolKind.allCases) { tool in
-                Button {
-                    interactionMode = .draw
-                    drawingTool = tool
-                    if tool != .eraser { drawingWidth = tool.defaultWidth }
-                } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: tool.icon)
-                            .font(.system(size: 22, weight: .medium))
-                            .foregroundStyle(interactionMode == .draw && drawingTool == tool ? Color.accentColor : Color.primary)
-                            .frame(width: 46, height: 46)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .fill(interactionMode == .draw && drawingTool == tool ? Color.accentColor.opacity(0.13) : Color(UIColor.systemBackground).opacity(0.7))
-                            )
-                        Image(systemName: "triangle.fill")
-                            .font(.system(size: 7))
-                            .foregroundStyle(interactionMode == .draw && drawingTool == tool ? Color.accentColor : .clear)
-                            .offset(y: 1)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(tool.title)
-            }
-
-            Divider()
-                .frame(height: 36)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Товщина \(Int(drawingWidth))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Slider(value: $drawingWidth, in: 1...24, step: 1)
-                    .frame(width: 120)
-            }
-
-            Divider()
-                .frame(height: 36)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Opacity \(Int(drawingOpacity * 100))%")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Slider(value: $drawingOpacity, in: 0.05...1, step: 0.05) {
-                    Text("Opacity")
-                } minimumValueLabel: {
-                    Image(systemName: "circle.lefthalf.filled")
-                } maximumValueLabel: {
-                    Image(systemName: "circle.fill")
-                }
-                .frame(width: 140)
-            }
-
-            Divider()
-                .frame(height: 36)
-
-            ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
-                Button {
-                    drawingColor = color
-                    selectedPaletteColorIndex = idx
-                } label: {
-                    Circle()
-                        .fill(color)
-                        .frame(width: 32, height: 32)
-                        .overlay(
-                            Circle()
-                                .stroke(Color.white, lineWidth: 2)
-                                .padding(2)
-                        )
-                        .overlay(
-                            Circle()
-                                .stroke(selectedPaletteColorIndex == idx ? Color.accentColor : .clear, lineWidth: 3)
-                        )
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Колір \(idx + 1)")
-            }
-
-            ColorPicker(
-                "",
-                selection: Binding(
-                    get: { drawingColor },
-                    set: { newColor in
-                        drawingColor = newColor
-                        selectedPaletteColorIndex = nil
-                    }
-                ),
-                supportsOpacity: false
+    private func editorDrawingCanvas(center: CGPoint) -> some View {
+        ZStack {
+            EditorImportedTextCanvasLayer(
+                center: center,
+                scale: scale,
+                offset: offset,
+                virtualCanvasSize: virtualCanvasSize,
+                importedTextLines: importedTextLines,
+                hiddenTextLineIds: hiddenTextLineIds,
+                searchQuery: searchQuery,
+                selectedTextLineIds: selectedTextLineIds,
+                textSelectionRect: textSelectionRect
             )
-            .labelsHidden()
-            .frame(width: 32, height: 32)
-            .clipShape(Circle())
-            .overlay(Circle().stroke(Color.white, lineWidth: 2))
-
-            Divider()
-                .frame(height: 36)
-
-            Menu {
-                Picker("Стиль", selection: $drawingStyle) {
-                    ForEach(DrawingStyle.allCases) { style in
-                        Text(style.rawValue).tag(style)
-                    }
-                }
-            } label: {
-                VStack(spacing: 4) {
-                    Image(systemName: "ruler")
-                        .font(.system(size: 20, weight: .regular))
-                        .frame(width: 46, height: 46)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(Color(UIColor.systemBackground).opacity(0.7)))
-                    Image(systemName: "triangle.fill")
-                        .font(.system(size: 7))
-                        .foregroundStyle(.clear)
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Лінійка та стиль")
+            EditorStrokesCanvasLayer(
+                scale: scale,
+                offset: offset,
+                strokes: strokes,
+                hiddenStrokeIds: hiddenStrokeIds,
+                currentStroke: currentStroke,
+                drawingColor: drawingColor,
+                drawingOpacity: drawingOpacity,
+                drawingStyle: drawingStyle,
+                drawingWidth: drawingWidth,
+                drawingTool: drawingTool,
+                interactionMode: interactionMode,
+                selectedItemBounds: (drawingTool == .cursor && interactionMode == .draw) ? selectedCanvasItemBounds() : nil,
+                cursorMarqueeRect: (drawingTool == .cursor && interactionMode == .draw) ? cursorSelectionRect : nil
+            )
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(
-            Capsule()
-                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+    }
+
+    private func editorTouchSurface() -> some View {
+        TouchSurfaceView(
+            onPencilBegan: { p in
+                if interactionMode == .draw {
+                    if drawingTool == .cursor {
+                        let cp = viewToContent(p)
+                        cursorPencilDragging = false
+                        cursorPencilResizing = false
+                        lastCursorPencilPointInView = nil
+                        if isPointNearResizeHandle(cp) {
+                            cursorPencilResizing = true
+                            lastCursorPencilPointInView = p
+                            hasCapturedTextDragUndo = false
+                            cursorSelectionStartPoint = nil
+                            cursorSelectionRect = nil
+                            return
+                        }
+                        if isPointInsideSelectedCanvasItems(cp) {
+                            cursorPencilDragging = true
+                            lastCursorPencilPointInView = p
+                            hasCapturedTextDragUndo = false
+                            cursorSelectionStartPoint = nil
+                            cursorSelectionRect = nil
+                            return
+                        }
+                        cursorSelectionStartPoint = cp
+                        cursorSelectionRect = CGRect(origin: cp, size: .zero)
+                        return
+                    }
+                    if drawingTool == .eraser {
+                        pushUndoSnapshot()
+                        hasCapturedEraseUndo = true
+                        _ = eraseStrokes(at: viewToContent(p))
+                        currentStroke = []
+                    } else {
+                        currentStroke = [viewToContent(p)]
+                    }
+                    return
+                }
+                guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
+                let cp = viewToContent(p)
+                if let hit = textLineAt(contentPoint: cp), selectedTextLineIds.contains(hit.id), !selectedTextLineIds.isEmpty {
+                    pencilDraggingTextSelection = true
+                    lastPencilPointInView = p
+                    hasCapturedTextDragUndo = false
+                } else {
+                    pencilDraggingTextSelection = false
+                    textSelectionStartPoint = cp
+                    textSelectionRect = CGRect(origin: cp, size: .zero)
+                    selectedTextLineId = nil
+                    selectedTextLineIds = []
+                }
+            },
+            onSingleTap: { p in
+                if interactionMode == .draw, drawingTool == .cursor {
+                    selectCanvasItem(at: viewToContent(p))
+                    return
+                }
+                guard interactionMode == .text, editingTextLineId == nil else { return }
+                if let line = textLineAt(contentPoint: viewToContent(p)) {
+                    selectedTextLineId = line.id
+                    selectedTextLineIds = [line.id]
+                } else {
+                    selectedTextLineId = nil
+                    selectedTextLineIds = []
+                }
+            },
+            onDoubleTap: { p in
+                guard interactionMode == .text else { return }
+                let cp = viewToContent(p)
+                if let line = textLineAt(contentPoint: cp) {
+                    selectedTextLineIds = [line.id]
+                    splitWordFromDoubleTap(at: cp, in: line)
+                }
+            },
+            onPencilDoubleTap: { p in
+                guard interactionMode == .text, editingTextLineId == nil else { return }
+                let cp = viewToContent(p)
+                if let line = textLineAt(contentPoint: cp) {
+                    selectedTextLineId = line.id
+                    selectedTextLineIds = [line.id]
+                    startEditingSelectedTextLine()
+                } else {
+                    startComposingNewText(at: cp)
+                }
+            },
+            onPencilMoved: { p in
+                if interactionMode == .draw {
+                    if drawingTool == .cursor {
+                        if cursorPencilDragging || cursorPencilResizing {
+                            guard let last = lastCursorPencilPointInView else { return }
+                            if !hasCapturedTextDragUndo { pushUndoSnapshot(); hasCapturedTextDragUndo = true }
+                            let delta = CGSize(width: p.x - last.x, height: p.y - last.y)
+                            if cursorPencilResizing {
+                                resizeSelectedCanvasItems(delta: delta)
+                            } else {
+                                moveSelectedCanvasItems(delta: delta)
+                            }
+                            lastCursorPencilPointInView = p
+                            return
+                        }
+                        if let start = cursorSelectionStartPoint {
+                            let c = viewToContent(p)
+                            cursorSelectionRect = CGRect(
+                                x: min(start.x, c.x),
+                                y: min(start.y, c.y),
+                                width: abs(c.x - start.x),
+                                height: abs(c.y - start.y)
+                            )
+                        }
+                        return
+                    }
+                    if drawingTool == .eraser {
+                        _ = eraseStrokes(at: viewToContent(p))
+                    } else {
+                        currentStroke.append(viewToContent(p))
+                    }
+                    return
+                }
+                guard interactionMode == .text else { return }
+                if pencilDraggingTextSelection {
+                    guard let last = lastPencilPointInView else { return }
+                    if !hasCapturedTextDragUndo {
+                        pushUndoSnapshot()
+                        detachSelectedTextLinesToNewDocumentIfNeeded()
+                        hasCapturedTextDragUndo = true
+                    }
+                    let dx = (p.x - last.x) / scale
+                    let dy = (p.y - last.y) / scale
+                    for i in importedTextLines.indices where selectedTextLineIds.contains(importedTextLines[i].id) {
+                        importedTextLines[i].position = CGPoint(x: importedTextLines[i].position.x + dx, y: importedTextLines[i].position.y + dy)
+                    }
+                    lastPencilPointInView = p
+                } else if let start = textSelectionStartPoint {
+                    let c = viewToContent(p)
+                    textSelectionRect = CGRect(x: min(start.x, c.x), y: min(start.y, c.y), width: abs(c.x - start.x), height: abs(c.y - start.y))
+                }
+            },
+            onPencilEnded: {
+                if interactionMode == .draw {
+                    if drawingTool == .cursor {
+                        if cursorPencilDragging || cursorPencilResizing {
+                            cursorPencilDragging = false
+                            cursorPencilResizing = false
+                            lastCursorPencilPointInView = nil
+                            hasCapturedTextDragUndo = false
+                            return
+                        }
+                        defer {
+                            cursorSelectionStartPoint = nil
+                            cursorSelectionRect = nil
+                        }
+                        guard let rect = cursorSelectionRect else { return }
+                        if rect.width > 3, rect.height > 3 {
+                            selectCanvasItems(in: rect)
+                        } else if let start = cursorSelectionStartPoint {
+                            selectCanvasItem(at: start)
+                        }
+                        return
+                    }
+                    if drawingTool == .eraser { hasCapturedEraseUndo = false; return }
+                    if currentStroke.count > 1 {
+                        pushUndoSnapshot()
+                        strokes.append(StrokeItem(points: currentStroke, color: drawingColor, width: drawingWidth, style: drawingStyle, opacity: drawingOpacity))
+                    }
+                    currentStroke = []
+                    return
+                }
+                guard interactionMode == .text else { return }
+                if pencilDraggingTextSelection {
+                    pencilDraggingTextSelection = false
+                    lastPencilPointInView = nil
+                    hasCapturedTextDragUndo = false
+                    return
+                }
+                defer { textSelectionStartPoint = nil; textSelectionRect = nil }
+                guard let rect = textSelectionRect, rect.width > 3, rect.height > 3 else { return }
+                selectTextFragments(in: rect)
+            },
+            onFingerPanBegan: { p in
+                if interactionMode == .draw, drawingTool == .cursor {
+                    let cp = viewToContent(p)
+                    if isPointNearResizeHandle(cp) {
+                        resizingCanvasItem = true
+                        hasCapturedTextDragUndo = false
+                        return
+                    }
+                    if isPointInsideSelectedCanvasItems(cp) {
+                        draggingStrokeId = nil
+                        draggingTextLineId = nil
+                        hasCapturedTextDragUndo = false
+                        return
+                    }
+                    if case .stroke(let id)? = selectedCanvasItem, strokeContainsPoint(id: id, point: cp) {
+                        draggingStrokeId = id
+                        hasCapturedTextDragUndo = false
+                        return
+                    }
+                    if case .text(let id)? = selectedCanvasItem, textContainsPoint(id: id, point: cp) {
+                        draggingTextLineId = id
+                        hasCapturedTextDragUndo = false
+                        return
+                    }
+                    selectCanvasItem(at: cp)
+                    return
+                }
+                guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
+                if let hit = textLineAt(contentPoint: viewToContent(p)) {
+                    if selectedTextLineIds.contains(hit.id) {
+                        draggingTextLineId = hit.id
+                    } else {
+                        selectedTextLineId = hit.id
+                        selectedTextLineIds = [hit.id]
+                        draggingTextLineId = hit.id
+                    }
+                    hasCapturedTextDragUndo = false
+                }
+            },
+            onFingerPanChanged: { t in
+                if interactionMode == .draw, drawingTool == .cursor {
+                    if !hasCapturedTextDragUndo { pushUndoSnapshot(); hasCapturedTextDragUndo = true }
+                    if resizingCanvasItem {
+                        resizeSelectedCanvasItems(delta: t)
+                        return
+                    }
+                    if !selectedCanvasLayerIds.isEmpty {
+                        moveSelectedCanvasItems(delta: t)
+                        return
+                    }
+                    if let dragId = draggingStrokeId {
+                        moveStroke(id: dragId, delta: t)
+                        return
+                    }
+                    if let dragId = draggingTextLineId {
+                        moveText(id: dragId, delta: t)
+                        return
+                    }
+                    return
+                }
+                if interactionMode == .draw {
+                    offset = CGSize(width: offset.width + t.width, height: offset.height + t.height)
+                    return
+                }
+                guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
+                if let dragId = draggingTextLineId, importedTextLines.contains(where: { $0.id == dragId }) {
+                    if !hasCapturedTextDragUndo {
+                        pushUndoSnapshot()
+                        detachSelectedTextLinesToNewDocumentIfNeeded()
+                        hasCapturedTextDragUndo = true
+                    }
+                    let dx = t.width / scale
+                    let dy = t.height / scale
+                    for i in importedTextLines.indices where selectedTextLineIds.contains(importedTextLines[i].id) {
+                        importedTextLines[i].position = CGPoint(x: importedTextLines[i].position.x + dx, y: importedTextLines[i].position.y + dy)
+                    }
+                } else {
+                    offset = CGSize(width: offset.width + t.width, height: offset.height + t.height)
+                }
+            },
+            onFingerPanEnded: {
+                draggingTextLineId = nil
+                draggingStrokeId = nil
+                resizingCanvasItem = false
+                hasCapturedTextDragUndo = false
+            },
+            onTwoFingerPanChanged: { t in
+                offset = CGSize(width: offset.width + t.width, height: offset.height + t.height)
+            },
+            onPinchChanged: { s, c in
+                if !currentStroke.isEmpty { currentStroke = [] }
+                let newScale = (scale * s).clamped(to: minScale...maxScale)
+                offset = CGSize(
+                    width: c.x * (1 - newScale / scale) + offset.width * (newScale / scale),
+                    height: c.y * (1 - newScale / scale) + offset.height * (newScale / scale)
+                )
+                scale = newScale
+            }
         )
     }
 
-    private var fileAndSearchPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button { showImportPicker = true } label: { Label("Імпорт DOCX", systemImage: "doc.badge.plus") }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Пошук")
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Пошук у тексті", text: $searchQuery)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled(true)
-                    if !searchQuery.isEmpty {
-                        Button { searchQuery = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                            .buttonStyle(.plain)
-                    }
+    private func toolDockContent(dockFrameSize: CGSize, placement: ToolDockPlacement) -> some View {
+        ToolDockContentView(
+            dockFrameSize: dockFrameSize,
+            placement: placement,
+            undoStackIsEmpty: undoStack.isEmpty,
+            redoStackIsEmpty: redoStack.isEmpty,
+            interactionMode: interactionMode,
+            drawingTool: drawingTool,
+            drawingWidth: drawingWidth,
+            drawingOpacity: drawingOpacity,
+            drawingStyle: drawingStyle,
+            drawingColor: drawingColor,
+            selectedPaletteColorIndex: selectedPaletteColorIndex,
+            paletteColors: paletteColors,
+            onUndo: { undo() },
+            onRedo: { redo() },
+            onTextMode: { interactionMode = .text },
+            onToolSelected: { tool in
+                interactionMode = .draw
+                drawingTool = tool
+                if tool != .eraser, tool != .cursor { drawingWidth = tool.defaultWidth }
+                if tool != .cursor {
+                    selectedCanvasItem = nil
+                    selectedCanvasLayerIds = []
                 }
-                .padding(.horizontal, 10).padding(.vertical, 8)
-                .frame(width: 240)
-                .background(Color(UIColor.systemBackground), in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(UIColor.separator).opacity(0.3), lineWidth: 1))
+            },
+            onDrawingWidthChanged: {
+                drawingWidth = $0
+                applyWidthToSelectedLayers($0)
+            },
+            onDrawingOpacityChanged: {
+                drawingOpacity = $0
+                applyOpacityToSelectedLayers($0)
+            },
+            onPaletteColorSelected: { idx, color in
+                drawingColor = color
+                selectedPaletteColorIndex = idx
+                applyColorToSelectedLayers(color)
+            },
+            onCustomColorSelected: { color in
+                drawingColor = color
+                selectedPaletteColorIndex = nil
+                applyColorToSelectedLayers(color)
+            },
+            onDrawingStyleChanged: {
+                drawingStyle = $0
+                applyStyleToSelectedLayers($0)
             }
-        }
-        .padding(12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        )
+    }
+
+    private var importButton: some View {
+        ImportButtonView(showImportPicker: $showImportPicker)
+    }
+
+    private var searchPanel: some View {
+        SearchPanelView(searchQuery: $searchQuery)
+    }
+
+
+
+    private func layersPanel(embedded: Bool) -> some View {
+        LayersPanelView(
+            listMaxHeight: embedded ? nil : 280,
+            useSidebarColumnWidth: embedded,
+            canvasLayers: canvasLayers,
+            layerGroupSections: layerGroupSections,
+            selectedLayerIdsForGrouping: selectedLayerIdsForGrouping,
+            createGroupFromSelection: createGroupFromSelection,
+            ungroup: ungroup,
+            toggleGroupExpansion: toggleGroupExpansion,
+            toggleGroupVisibility: toggleGroupVisibility,
+            isSectionVisible: isSectionVisible,
+            toggleLayerSelectionForGrouping: toggleLayerSelectionForGrouping,
+            layerNameBinding: layerNameBinding,
+            groupNameBinding: groupNameBinding,
+            toggleLayerVisibility: toggleLayerVisibility,
+            isLayerVisible: isLayerVisible
+        )
     }
 
     @ViewBuilder
@@ -716,7 +708,7 @@ struct ContentView: View {
     }
 
     private func textLineAt(contentPoint: CGPoint) -> ImportedTextLine? {
-        importedTextLines.last { boundsForTextLine($0).contains(contentPoint) }
+        importedTextLines.last { !hiddenTextLineIds.contains($0.id) && boundsForTextLine($0).contains(contentPoint) }
     }
 
     private func boundsForTextLine(_ line: ImportedTextLine) -> CGRect {
@@ -750,6 +742,10 @@ struct ContentView: View {
         guard !selectedTextLineIds.isEmpty else { return }
         pushUndoSnapshot()
         importedTextLines.removeAll { selectedTextLineIds.contains($0.id) }
+        sanitizeLayerGroups()
+        if case .text(let id)? = selectedCanvasItem, !importedTextLines.contains(where: { $0.id == id }) {
+            selectedCanvasItem = nil
+        }
         selectedTextLineId = nil
         selectedTextLineIds = []
     }
@@ -939,12 +935,294 @@ struct ContentView: View {
         }
     }
 
+    private var selectedStrokeBinding: Binding<StrokeItem>? {
+        guard case .stroke(let id)? = selectedCanvasItem,
+              let index = strokes.firstIndex(where: { $0.id == id }) else { return nil }
+        return $strokes[index]
+    }
+
+    private var selectedTextBinding: Binding<ImportedTextLine>? {
+        guard case .text(let id)? = selectedCanvasItem,
+              let index = importedTextLines.firstIndex(where: { $0.id == id }) else { return nil }
+        return $importedTextLines[index]
+    }
+
+    private func selectCanvasItem(at contentPoint: CGPoint) {
+        if let line = textLineAt(contentPoint: contentPoint) {
+            selectedCanvasItem = .text(line.id)
+            selectedCanvasLayerIds = [CanvasLayer.text(line).id]
+            let docLineIds = importedTextLines.filter { $0.documentId == line.documentId }.map(\.id)
+            selectedTextLineId = line.id
+            selectedTextLineIds = Set(docLineIds)
+            return
+        }
+        if let stroke = strokeAt(contentPoint: contentPoint) {
+            selectedCanvasItem = .stroke(stroke.id)
+            selectedCanvasLayerIds = [CanvasLayer.stroke(stroke).id]
+            selectedTextLineId = nil
+            selectedTextLineIds = []
+            return
+        }
+        selectedCanvasItem = nil
+        selectedCanvasLayerIds = []
+        selectedTextLineId = nil
+        selectedTextLineIds = []
+    }
+
+    private func strokeAt(contentPoint: CGPoint) -> StrokeItem? {
+        let threshold = max(10, drawingWidth) / scale
+        let threshold2 = threshold * threshold
+        return strokes.reversed().first { stroke in
+            guard !hiddenStrokeIds.contains(stroke.id) else { return false }
+            return stroke.points.contains { p in
+                let dx = p.x - contentPoint.x
+                let dy = p.y - contentPoint.y
+                return dx * dx + dy * dy <= threshold2
+            }
+        }
+    }
+
+    private func selectedCanvasItemBounds() -> CGRect? {
+        let layerIds = selectedCanvasLayerIds
+        if !layerIds.isEmpty {
+            let rects: [CGRect] = canvasLayers.compactMap { layer in
+                guard layerIds.contains(layer.id) else { return nil }
+                return boundsForCanvasLayer(layer)
+            }
+            guard let first = rects.first else { return nil }
+            return rects.dropFirst().reduce(first) { $0.union($1) }
+        }
+        guard let item = selectedCanvasItem else { return nil }
+        switch item {
+        case .stroke(let id):
+            guard let stroke = strokes.first(where: { $0.id == id }) else { return nil }
+            return strokeBounds(stroke.points)
+        case .text(let id):
+            guard let line = importedTextLines.first(where: { $0.id == id }) else { return nil }
+            return boundsForTextLine(line)
+        }
+    }
+
+    private func isPointNearResizeHandle(_ point: CGPoint) -> Bool {
+        guard let bounds = selectedCanvasItemBounds() else { return false }
+        let handle = CGPoint(x: bounds.maxX, y: bounds.maxY)
+        let dx = point.x - handle.x
+        let dy = point.y - handle.y
+        return (dx * dx + dy * dy) <= 220 / (scale * scale)
+    }
+
+    private func strokeContainsPoint(id: UUID, point: CGPoint) -> Bool {
+        guard let stroke = strokes.first(where: { $0.id == id }) else { return false }
+        let threshold = max(10, stroke.width) / scale
+        let threshold2 = threshold * threshold
+        return stroke.points.contains {
+            let dx = $0.x - point.x
+            let dy = $0.y - point.y
+            return dx * dx + dy * dy <= threshold2
+        }
+    }
+
+    private func textContainsPoint(id: UUID, point: CGPoint) -> Bool {
+        guard let line = importedTextLines.first(where: { $0.id == id }) else { return false }
+        return boundsForTextLine(line).contains(point)
+    }
+
+    private func moveStroke(id: UUID, delta: CGSize) {
+        guard let index = strokes.firstIndex(where: { $0.id == id }) else { return }
+        let dx = delta.width / scale
+        let dy = delta.height / scale
+        strokes[index].points = strokes[index].points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+    }
+
+    private func moveText(id: UUID, delta: CGSize) {
+        guard let index = importedTextLines.firstIndex(where: { $0.id == id }) else { return }
+        let dx = delta.width / scale
+        let dy = delta.height / scale
+        importedTextLines[index].position = CGPoint(
+            x: importedTextLines[index].position.x + dx,
+            y: importedTextLines[index].position.y + dy
+        )
+    }
+
+    private func resizeSelectedCanvasItem(delta: CGSize) {
+        let amount = (delta.width + delta.height) / 220
+        let factor = (1 + amount).clamped(to: 0.4...2.2)
+        switch selectedCanvasItem {
+        case .stroke(let id):
+            guard let index = strokes.firstIndex(where: { $0.id == id }) else { return }
+            let bounds = strokeBounds(strokes[index].points)
+            let center = CGPoint(x: bounds.midX, y: bounds.midY)
+            strokes[index].points = strokes[index].points.map {
+                CGPoint(x: center.x + ($0.x - center.x) * factor, y: center.y + ($0.y - center.y) * factor)
+            }
+            strokes[index].width = (strokes[index].width * factor).clamped(to: 1...48)
+        case .text(let id):
+            guard let index = importedTextLines.firstIndex(where: { $0.id == id }) else { return }
+            importedTextLines[index].fontSize = (importedTextLines[index].fontSize * factor).clamped(to: 8...120)
+        case nil:
+            return
+        }
+    }
+
+    private func boundsForCanvasLayer(_ layer: CanvasLayer) -> CGRect {
+        switch layer {
+        case .stroke(let stroke):
+            return strokeBounds(stroke.points)
+        case .text(let line):
+            return boundsForTextLine(line)
+        }
+    }
+
+    private func selectCanvasItems(in rect: CGRect) {
+        let picked = canvasLayers.filter { layer in
+            let bounds = boundsForCanvasLayer(layer)
+            return bounds.intersects(rect)
+        }
+        selectedCanvasLayerIds = Set(picked.map(\.id))
+        syncPrimarySelectionFromSet()
+    }
+
+    private func isPointInsideSelectedCanvasItems(_ point: CGPoint) -> Bool {
+        guard !selectedCanvasLayerIds.isEmpty else { return false }
+        return canvasLayers.contains { layer in
+            selectedCanvasLayerIds.contains(layer.id) && boundsForCanvasLayer(layer).contains(point)
+        }
+    }
+
+    private func moveSelectedCanvasItems(delta: CGSize) {
+        let dx = delta.width / scale
+        let dy = delta.height / scale
+        for i in strokes.indices {
+            let layerId = CanvasLayer.stroke(strokes[i]).id
+            guard selectedCanvasLayerIds.contains(layerId) else { continue }
+            strokes[i].points = strokes[i].points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+        }
+        for i in importedTextLines.indices {
+            let layerId = CanvasLayer.text(importedTextLines[i]).id
+            guard selectedCanvasLayerIds.contains(layerId) else { continue }
+            importedTextLines[i].position = CGPoint(x: importedTextLines[i].position.x + dx, y: importedTextLines[i].position.y + dy)
+        }
+    }
+
+    private func resizeSelectedCanvasItems(delta: CGSize) {
+        guard let bounds = selectedCanvasItemBounds() else { return }
+        let amount = (delta.width + delta.height) / 220
+        let factor = (1 + amount).clamped(to: 0.4...2.2)
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+
+        for i in strokes.indices {
+            let layerId = CanvasLayer.stroke(strokes[i]).id
+            guard selectedCanvasLayerIds.contains(layerId) else { continue }
+            strokes[i].points = strokes[i].points.map {
+                CGPoint(x: center.x + ($0.x - center.x) * factor, y: center.y + ($0.y - center.y) * factor)
+            }
+            strokes[i].width = (strokes[i].width * factor).clamped(to: 1...48)
+        }
+        for i in importedTextLines.indices {
+            let layerId = CanvasLayer.text(importedTextLines[i]).id
+            guard selectedCanvasLayerIds.contains(layerId) else { continue }
+            importedTextLines[i].position = CGPoint(
+                x: center.x + (importedTextLines[i].position.x - center.x) * factor,
+                y: center.y + (importedTextLines[i].position.y - center.y) * factor
+            )
+            importedTextLines[i].fontSize = (importedTextLines[i].fontSize * factor).clamped(to: 8...120)
+        }
+        syncPrimarySelectionFromSet()
+    }
+
+    private func applyWidthToSelectedLayers(_ width: CGFloat) {
+        guard interactionMode == .draw, drawingTool == .cursor, !selectedCanvasLayerIds.isEmpty else { return }
+        for i in strokes.indices {
+            let layerId = CanvasLayer.stroke(strokes[i]).id
+            guard selectedCanvasLayerIds.contains(layerId) else { continue }
+            strokes[i].width = width
+        }
+    }
+
+    private func applyOpacityToSelectedLayers(_ opacity: Double) {
+        guard interactionMode == .draw, drawingTool == .cursor, !selectedCanvasLayerIds.isEmpty else { return }
+        for i in strokes.indices {
+            let layerId = CanvasLayer.stroke(strokes[i]).id
+            guard selectedCanvasLayerIds.contains(layerId) else { continue }
+            strokes[i].opacity = opacity
+        }
+    }
+
+    private func applyColorToSelectedLayers(_ color: Color) {
+        guard interactionMode == .draw, drawingTool == .cursor, !selectedCanvasLayerIds.isEmpty else { return }
+        for i in strokes.indices {
+            let layerId = CanvasLayer.stroke(strokes[i]).id
+            guard selectedCanvasLayerIds.contains(layerId) else { continue }
+            strokes[i].color = color
+        }
+        for i in importedTextLines.indices {
+            let layerId = CanvasLayer.text(importedTextLines[i]).id
+            guard selectedCanvasLayerIds.contains(layerId) else { continue }
+            importedTextLines[i].color = color
+        }
+    }
+
+    private func applyStyleToSelectedLayers(_ style: DrawingStyle) {
+        guard interactionMode == .draw, drawingTool == .cursor, !selectedCanvasLayerIds.isEmpty else { return }
+        for i in strokes.indices {
+            let layerId = CanvasLayer.stroke(strokes[i]).id
+            guard selectedCanvasLayerIds.contains(layerId) else { continue }
+            strokes[i].style = style
+        }
+    }
+
+    private func syncPrimarySelectionFromSet() {
+        guard selectedCanvasLayerIds.count == 1, let id = selectedCanvasLayerIds.first else {
+            selectedCanvasItem = nil
+            return
+        }
+        if let uuid = UUID(uuidString: id.replacingOccurrences(of: "stroke-", with: "")), id.hasPrefix("stroke-") {
+            selectedCanvasItem = .stroke(uuid)
+            return
+        }
+        if let uuid = UUID(uuidString: id.replacingOccurrences(of: "textdoc-", with: "")), id.hasPrefix("textdoc-") {
+            if let firstLine = importedTextLines.first(where: { $0.documentId == uuid }) {
+                selectedCanvasItem = .text(firstLine.id)
+                selectedTextLineId = firstLine.id
+                selectedTextLineIds = Set(importedTextLines.filter { $0.documentId == uuid }.map(\.id))
+            } else {
+                selectedCanvasItem = nil
+            }
+            return
+        }
+        selectedCanvasItem = nil
+    }
+
+    private func detachSelectedTextLinesToNewDocumentIfNeeded() {
+        guard !selectedTextLineIds.isEmpty else { return }
+        let newDocumentId = UUID()
+        for i in importedTextLines.indices where selectedTextLineIds.contains(importedTextLines[i].id) {
+            importedTextLines[i].documentId = newDocumentId
+        }
+    }
+
+    private func strokeBounds(_ points: [CGPoint]) -> CGRect {
+        guard let first = points.first else { return .zero }
+        var minX = first.x
+        var minY = first.y
+        var maxX = first.x
+        var maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            minY = min(minY, point.y)
+            maxX = max(maxX, point.x)
+            maxY = max(maxY, point.y)
+        }
+        return CGRect(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY))
+    }
+
     private func eraseStrokes(at contentPoint: CGPoint) -> Bool {
         let radius = max(8, drawingWidth) / scale
         let r2 = radius * radius
         let old = strokes.count
         strokes.removeAll { stroke in
-            stroke.points.contains {
+            guard !hiddenStrokeIds.contains(stroke.id) else { return false }
+            return stroke.points.contains {
                 let dx = $0.x - contentPoint.x
                 let dy = $0.y - contentPoint.y
                 return dx * dx + dy * dy <= r2
@@ -977,6 +1255,9 @@ struct ContentView: View {
     private func apply(snapshot: CanvasSnapshot) {
         strokes = snapshot.strokes
         importedTextLines = snapshot.importedTextLines
+        hiddenStrokeIds = hiddenStrokeIds.intersection(Set(strokes.map(\.id)))
+        hiddenTextLineIds = hiddenTextLineIds.intersection(Set(importedTextLines.map(\.id)))
+        sanitizeLayerGroups()
         currentStroke = []
         selectedTextLineId = nil
         selectedTextLineIds = []
@@ -986,6 +1267,15 @@ struct ContentView: View {
         composingText = ""
         composingTextPosition = nil
         draggingTextLineId = nil
+        draggingStrokeId = nil
+        resizingCanvasItem = false
+        selectedCanvasItem = nil
+        selectedCanvasLayerIds = []
+        cursorSelectionStartPoint = nil
+        cursorSelectionRect = nil
+        cursorPencilDragging = false
+        cursorPencilResizing = false
+        lastCursorPencilPointInView = nil
         hasCapturedTextDragUndo = false
         hasCapturedEraseUndo = false
         textSelectionStartPoint = nil
@@ -1020,202 +1310,255 @@ struct ContentView: View {
     }
 
     private func textWidthPrefix(_ text: String, length: Int, fontSize: CGFloat) -> CGFloat {
-        let ns = text as NSString
+         let ns = text as NSString
         let l = min(max(0, length), ns.length)
         return (ns.substring(to: l) as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: fontSize)]).width
     }
-}
 
-private enum DocxPlainTextParser {
-    static func parseParagraphs(from url: URL) throws -> [String] {
-        guard let archive = Archive(url: url, accessMode: .read), let entry = archive["word/document.xml"] else { return [] }
-        var data = Data()
-        _ = try archive.extract(entry) { data.append($0) }
-        let delegate = DocxDocumentXMLDelegate()
-        let parser = XMLParser(data: data)
-        parser.delegate = delegate
-        parser.parse()
-        return delegate.paragraphs.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var canvasLayers: [CanvasLayer] {
+        let strokeLayers = strokes.map(CanvasLayer.stroke)
+        let textLayers = Dictionary(grouping: importedTextLines, by: \.documentId)
+            .values
+            .compactMap { lines in
+                lines.sorted { $0.order < $1.order }.first.map(CanvasLayer.text)
+            }
+        return strokeLayers + textLayers
     }
 
-    private final class DocxDocumentXMLDelegate: NSObject, XMLParserDelegate {
-        var paragraphs: [String] = []
-        private var inText = false
-        private var currentParagraph = ""
+    private var layerGroupSections: [LayerGroupSection] {
+        let layerMap = Dictionary(uniqueKeysWithValues: canvasLayers.map { ($0.id, $0) })
+        var sections: [LayerGroupSection] = []
+        var groupedIds: Set<String> = []
 
-        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
-            let name = elementName.split(separator: ":").last.map(String.init) ?? elementName
-            switch name {
-            case "p": currentParagraph = ""
-            case "t": inText = true
-            case "tab": currentParagraph.append("    ")
-            case "br": currentParagraph.append("\n")
-            default: break
+        for group in layerGroups {
+            let layers = group.memberLayerIds.compactMap { layerMap[$0] }
+            guard !layers.isEmpty else { continue }
+            groupedIds.formUnion(layers.map(\.id))
+            sections.append(
+                LayerGroupSection(
+                    id: "group-\(group.id.uuidString)",
+                    title: group.name,
+                    groupId: group.id,
+                    layers: layers,
+                    isExpanded: group.isExpanded
+                )
+            )
+        }
+
+        let ungrouped = canvasLayers.filter { !groupedIds.contains($0.id) }
+        if !ungrouped.isEmpty {
+            sections.append(
+                LayerGroupSection(
+                    id: "ungrouped",
+                    title: "Без групи",
+                    groupId: nil,
+                    layers: ungrouped,
+                    isExpanded: true
+                )
+            )
+        }
+        return sections
+    }
+
+    private func isLayerVisible(_ layer: CanvasLayer) -> Bool {
+        switch layer {
+        case .stroke(let stroke):
+            return !hiddenStrokeIds.contains(stroke.id)
+        case .text(let line):
+            return !importedTextLines.contains(where: { $0.documentId == line.documentId && hiddenTextLineIds.contains($0.id) })
+        }
+    }
+
+    private func toggleLayerVisibility(_ layer: CanvasLayer) {
+        switch layer {
+        case .stroke(let stroke):
+            if hiddenStrokeIds.contains(stroke.id) {
+                hiddenStrokeIds.remove(stroke.id)
+            } else {
+                hiddenStrokeIds.insert(stroke.id)
             }
-        }
-
-        func parser(_ parser: XMLParser, foundCharacters string: String) {
-            if inText { currentParagraph.append(string) }
-        }
-
-        func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
-            let name = elementName.split(separator: ":").last.map(String.init) ?? elementName
-            switch name {
-            case "t": inText = false
-            case "p":
-                paragraphs.append(currentParagraph)
-                currentParagraph = ""
-            default: break
+        case .text(let line):
+            let ids = importedTextLines.filter { $0.documentId == line.documentId }.map(\.id)
+            let allHidden = ids.allSatisfy { hiddenTextLineIds.contains($0) }
+            if allHidden {
+                hiddenTextLineIds.subtract(ids)
+            } else {
+                hiddenTextLineIds.formUnion(ids)
+                selectedTextLineIds.subtract(ids)
+                if let selectedTextLineId, ids.contains(selectedTextLineId) { self.selectedTextLineId = nil }
+                if let editingTextLineId, ids.contains(editingTextLineId) {
+                    self.editingTextLineId = nil
+                    editingTextLineText = ""
+                }
             }
         }
     }
-}
 
-private struct TouchSurfaceView: UIViewRepresentable {
-    var onPencilBegan: (CGPoint) -> Void
-    var onSingleTap: (CGPoint) -> Void
-    var onDoubleTap: (CGPoint) -> Void
-    var onPencilDoubleTap: (CGPoint) -> Void
-    var onPencilMoved: (CGPoint) -> Void
-    var onPencilEnded: () -> Void
-    var onFingerPanBegan: (CGPoint) -> Void
-    var onFingerPanChanged: (CGSize) -> Void
-    var onFingerPanEnded: () -> Void
-    var onTwoFingerPanChanged: (CGSize) -> Void
-    var onPinchChanged: (_ scaleDelta: CGFloat, _ center: CGPoint) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
-        view.backgroundColor = .clear
-
-        let pencilPan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePencilPan(_:)))
-        pencilPan.minimumNumberOfTouches = 1
-        pencilPan.maximumNumberOfTouches = 1
-        pencilPan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
-        pencilPan.delegate = context.coordinator
-
-        let fingerPan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleFingerPan(_:)))
-        fingerPan.minimumNumberOfTouches = 1
-        fingerPan.maximumNumberOfTouches = 1
-        fingerPan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        fingerPan.delegate = context.coordinator
-
-        let singleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleSingleTap(_:)))
-        singleTap.numberOfTapsRequired = 1
-        singleTap.numberOfTouchesRequired = 1
-        singleTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        singleTap.delegate = context.coordinator
-
-        let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
-        doubleTap.numberOfTapsRequired = 2
-        doubleTap.numberOfTouchesRequired = 1
-        doubleTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        doubleTap.delegate = context.coordinator
-        singleTap.require(toFail: doubleTap)
-
-        let pencilDoubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePencilDoubleTap(_:)))
-        pencilDoubleTap.numberOfTapsRequired = 2
-        pencilDoubleTap.numberOfTouchesRequired = 1
-        pencilDoubleTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
-        pencilDoubleTap.delegate = context.coordinator
-
-        let navPan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTwoFingerPan(_:)))
-        navPan.minimumNumberOfTouches = 2
-        navPan.maximumNumberOfTouches = 2
-        navPan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        navPan.delegate = context.coordinator
-
-        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
-        pinch.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        pinch.delegate = context.coordinator
-
-        view.addGestureRecognizer(pencilPan)
-        view.addGestureRecognizer(fingerPan)
-        view.addGestureRecognizer(singleTap)
-        view.addGestureRecognizer(doubleTap)
-        view.addGestureRecognizer(pencilDoubleTap)
-        view.addGestureRecognizer(navPan)
-        view.addGestureRecognizer(pinch)
-
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) { context.coordinator.parent = self }
-
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var parent: TouchSurfaceView
-        init(_ parent: TouchSurfaceView) { self.parent = parent }
-
-        @objc func handlePencilPan(_ g: UIPanGestureRecognizer) {
-            let p = g.location(in: g.view)
-            switch g.state {
-            case .began: parent.onPencilBegan(p)
-            case .changed: parent.onPencilMoved(p)
-            case .ended, .cancelled, .failed: parent.onPencilEnded()
-            default: break
-            }
-        }
-
-        @objc func handleFingerPan(_ g: UIPanGestureRecognizer) {
-            let p = g.location(in: g.view)
-            switch g.state {
-            case .began:
-                parent.onFingerPanBegan(p)
-            case .changed:
-                let t = g.translation(in: g.view)
-                parent.onFingerPanChanged(CGSize(width: t.x, height: t.y))
-                g.setTranslation(.zero, in: g.view)
-            case .ended, .cancelled, .failed:
-                parent.onFingerPanEnded()
-            default:
-                break
-            }
-        }
-
-        @objc func handleSingleTap(_ g: UITapGestureRecognizer) {
-            guard g.state == .ended else { return }
-            parent.onSingleTap(g.location(in: g.view))
-        }
-
-        @objc func handleDoubleTap(_ g: UITapGestureRecognizer) {
-            guard g.state == .ended else { return }
-            parent.onDoubleTap(g.location(in: g.view))
-        }
-
-        @objc func handlePencilDoubleTap(_ g: UITapGestureRecognizer) {
-            guard g.state == .ended else { return }
-            parent.onPencilDoubleTap(g.location(in: g.view))
-        }
-
-        @objc func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
-            let t = g.translation(in: g.view)
-            parent.onTwoFingerPanChanged(CGSize(width: t.x, height: t.y))
-            g.setTranslation(.zero, in: g.view)
-        }
-
-        @objc func handlePinch(_ g: UIPinchGestureRecognizer) {
-            guard let view = g.view else { return }
-            parent.onPinchChanged(g.scale, g.location(in: view))
-            g.scale = 1
-        }
-
-        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            let combo = (g is UIPinchGestureRecognizer && other is UIPanGestureRecognizer) || (g is UIPanGestureRecognizer && other is UIPinchGestureRecognizer)
-            return combo
+    private func toggleLayerSelectionForGrouping(_ layerId: String) {
+        if selectedLayerIdsForGrouping.contains(layerId) {
+            selectedLayerIdsForGrouping.remove(layerId)
+        } else {
+            selectedLayerIdsForGrouping.insert(layerId)
         }
     }
-}
 
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
+    private func createGroupFromSelection() {
+        guard selectedLayerIdsForGrouping.count >= 2 else { return }
+        let memberIds = Array(selectedLayerIdsForGrouping)
+        for index in layerGroups.indices {
+            layerGroups[index].memberLayerIds.removeAll { selectedLayerIdsForGrouping.contains($0) }
+        }
+        layerGroups.removeAll { $0.memberLayerIds.isEmpty }
+        layerGroups.append(LayerGroup(name: "Група \(layerGroups.count + 1)", memberLayerIds: memberIds))
+        selectedLayerIdsForGrouping.removeAll()
+    }
+
+    private func ungroup(_ groupId: UUID) {
+        layerGroups.removeAll { $0.id == groupId }
+    }
+
+    private func toggleGroupExpansion(_ groupId: UUID) {
+        guard let index = layerGroups.firstIndex(where: { $0.id == groupId }) else { return }
+        layerGroups[index].isExpanded.toggle()
+    }
+
+    private func isSectionVisible(_ section: LayerGroupSection) -> Bool {
+        section.layers.allSatisfy(isLayerVisible(_:))
+    }
+
+    private func toggleGroupVisibility(_ section: LayerGroupSection) {
+        let makeVisible = !isSectionVisible(section)
+        for layer in section.layers {
+            setLayerVisibility(layer, isVisible: makeVisible)
+        }
+    }
+
+    private func setLayerVisibility(_ layer: CanvasLayer, isVisible: Bool) {
+        switch layer {
+        case .stroke(let stroke):
+            if isVisible {
+                hiddenStrokeIds.remove(stroke.id)
+            } else {
+                hiddenStrokeIds.insert(stroke.id)
+            }
+        case .text(let line):
+            if isVisible {
+                let ids = importedTextLines.filter { $0.documentId == line.documentId }.map(\.id)
+                hiddenTextLineIds.subtract(ids)
+            } else {
+                let ids = importedTextLines.filter { $0.documentId == line.documentId }.map(\.id)
+                hiddenTextLineIds.formUnion(ids)
+                selectedTextLineIds.subtract(ids)
+                if let selectedTextLineId, ids.contains(selectedTextLineId) { self.selectedTextLineId = nil }
+                if let editingTextLineId, ids.contains(editingTextLineId) {
+                    self.editingTextLineId = nil
+                    editingTextLineText = ""
+                }
+            }
+        }
+    }
+
+    private func sanitizeLayerGroups() {
+        let validIds = Set(canvasLayers.map(\.id))
+        for index in layerGroups.indices {
+            layerGroups[index].memberLayerIds.removeAll { !validIds.contains($0) }
+        }
+        layerGroups.removeAll { $0.memberLayerIds.isEmpty }
+        selectedLayerIdsForGrouping = selectedLayerIdsForGrouping.intersection(validIds)
+        customLayerNames = customLayerNames.filter { validIds.contains($0.key) }
+        selectedCanvasLayerIds = selectedCanvasLayerIds.intersection(validIds)
+        if let selected = selectedCanvasItem {
+            switch selected {
+            case .stroke(let id):
+                if !strokes.contains(where: { $0.id == id }) { selectedCanvasItem = nil }
+            case .text(let id):
+                if !importedTextLines.contains(where: { $0.id == id }) { selectedCanvasItem = nil }
+            }
+        }
+        if selectedCanvasItem == nil { syncPrimarySelectionFromSet() }
+    }
+
+    private func groupNameBinding(_ groupId: UUID) -> Binding<String> {
+        Binding(
+            get: {
+                layerGroups.first(where: { $0.id == groupId })?.name ?? "Група"
+            },
+            set: { newValue in
+                guard let index = layerGroups.firstIndex(where: { $0.id == groupId }) else { return }
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                layerGroups[index].name = trimmed.isEmpty ? "Група \(index + 1)" : newValue
+            }
+        )
+    }
+
+    private func layerNameBinding(_ layer: CanvasLayer) -> Binding<String> {
+        Binding(
+            get: {
+                customLayerNames[layer.id] ?? layer.title
+            },
+            set: { newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty || trimmed == layer.title {
+                    customLayerNames.removeValue(forKey: layer.id)
+                } else {
+                    customLayerNames[layer.id] = newValue
+                }
+            }
+        )
+    }
+
+    private var canvasStateFileURL: URL {
+        projectStore.canvasFileURL(for: projectId)
+    }
+
+    private func saveCanvasState() {
+        let state = CanvasStateDTO(
+            scale: Double(scale),
+            offsetX: Double(offset.width),
+            offsetY: Double(offset.height),
+            strokes: strokes.map(StrokeItemDTO.init),
+            hiddenStrokeIds: Array(hiddenStrokeIds),
+            importedTextLines: importedTextLines.map(ImportedTextLineDTO.init),
+            hiddenTextLineIds: Array(hiddenTextLineIds),
+            layerGroups: layerGroups.map(LayerGroupDTO.init),
+            customLayerNames: customLayerNames,
+            toolDockPlacement: toolDockPlacement.rawValue
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(state) else { return }
+        try? data.write(to: canvasStateFileURL, options: .atomic)
+        if let png = CanvasPreviewRenderer.pngData(from: state) {
+            projectStore.writePreviewPNG(id: projectId, data: png)
+        }
+        projectStore.touchModified(id: projectId)
+    }
+
+    private func loadCanvasStateIfNeeded() {
+        guard let data = try? Data(contentsOf: canvasStateFileURL),
+              let state = try? JSONDecoder().decode(CanvasStateDTO.self, from: data) else { return }
+
+        scale = CGFloat(state.scale).clamped(to: minScale...maxScale)
+        offset = CGSize(width: CGFloat(state.offsetX), height: CGFloat(state.offsetY))
+        strokes = state.strokes.map(\.strokeItem)
+        hiddenStrokeIds = Set(state.hiddenStrokeIds)
+        importedTextLines = state.importedTextLines.map(\.importedTextLine)
+        hiddenTextLineIds = Set(state.hiddenTextLineIds)
+        layerGroups = state.layerGroups.map(\.layerGroup)
+        customLayerNames = state.customLayerNames
+        if let raw = state.toolDockPlacement, let p = ToolDockPlacement(rawValue: raw) {
+            toolDockPlacement = p
+        } else {
+            toolDockPlacement = .bottom
+        }
+        sanitizeLayerGroups()
     }
 }
 
 #Preview {
-    ContentView()
+    NavigationStack {
+        ContentView(projectId: UUID())
+    }
 }
 
 //
