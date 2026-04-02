@@ -11,7 +11,7 @@ import SwiftUI
 struct DocumentsPainterApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ProjectLibraryView()
         }
     }
 }
