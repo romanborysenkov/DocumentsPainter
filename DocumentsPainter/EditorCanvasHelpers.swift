@@ -2,8 +2,20 @@ import SwiftUI
 import UIKit
 
 enum EditorCanvasHelpers {
+    private static let textWidthCache = NSCache<NSString, NSNumber>()
+
     static func contentToView(_ point: CGPoint, scale: CGFloat, offset: CGSize) -> CGPoint {
         CGPoint(x: point.x * scale + offset.width, y: point.y * scale + offset.height)
+    }
+
+    static func textWidth(_ text: String, fontSize: CGFloat) -> CGFloat {
+        let key = "\(fontSize)|\(text)" as NSString
+        if let cached = textWidthCache.object(forKey: key) {
+            return CGFloat(cached.doubleValue)
+        }
+        let width = (text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: fontSize)]).width
+        textWidthCache.setObject(NSNumber(value: Double(width)), forKey: key)
+        return width
     }
 
     static func searchRanges(in text: String, query: String) -> [NSRange] {
@@ -30,7 +42,7 @@ enum EditorCanvasHelpers {
     }
 
     static func boundsForTextLine(_ line: ImportedTextLine) -> CGRect {
-        let width = (line.text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: line.fontSize)]).width
+        let width = textWidth(line.text, fontSize: line.fontSize)
         return CGRect(x: line.position.x, y: line.position.y, width: width, height: line.fontSize * 1.3)
     }
 

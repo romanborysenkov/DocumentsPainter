@@ -1,25 +1,23 @@
 import SwiftUI
 
-private enum LibrarySidebar: Hashable {
-    case drawings
-}
-
 struct ProjectLibraryView: View {
-    @State private var selectedSidebar: LibrarySidebar? = .drawings
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var navigationPath = NavigationPath()
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $selectedSidebar) {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            List {
                 Section("На цьому iPad") {
                     Label("Мої малюнки", systemImage: "folder.fill")
-                        .tag(LibrarySidebar.drawings)
                 }
             }
             .navigationTitle("DocumentsPainter")
         } detail: {
             NavigationStack(path: $navigationPath) {
                 ProjectGridView(navigationPath: $navigationPath)
+            }
+            .onChange(of: navigationPath.count) { _, count in
+                columnVisibility = count > 0 ? .detailOnly : .all
             }
         }
     }

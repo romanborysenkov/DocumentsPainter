@@ -20,9 +20,9 @@ struct ContentView: View {
 
     @State private var importedTextLines: [ImportedTextLine] = []
     @State private var hiddenTextLineIds: Set<UUID> = []
-    @State private var layerGroups: [LayerGroup] = []
-    @State private var selectedLayerIdsForGrouping: Set<String> = []
-    @State private var customLayerNames: [String: String] = [:]
+    @State private var artLayers: [CanvasArtLayer] = []
+    @State private var activeLayerId: UUID = UUID()
+    @State private var hiddenArtLayerIds: Set<UUID> = []
     @State private var selectedTextLineId: UUID?
     @State private var selectedTextLineIds: Set<UUID> = []
     @State private var selectedCanvasItem: SelectedCanvasItem?
@@ -64,23 +64,38 @@ struct ContentView: View {
     @State private var drawingStyle: DrawingStyle = .solid
 
     @State private var showImportPicker = false
+    @State private var showExportPicker = false
+    @State private var exportDocument = CanvasExportFileDocument(data: Data())
+    @State private var exportContentType: UTType = .png
+    @State private var exportDefaultFilename = "Canvas.png"
+    @State private var exportErrorMessage: String?
+    @State private var showCanvasSettings = false
+    @State private var canvasBackground: CanvasBackgroundKind = .dots
+    @AppStorage("settings.pencilTap2Action") private var pencilTap2ActionRaw = PencilTapShortcutAction.selectTextTool.rawValue
+    @AppStorage("settings.fingerTap2Action") private var fingerTap2ActionRaw = PencilTapShortcutAction.undo.rawValue
+    @AppStorage("settings.fingerTap3Action") private var fingerTap3ActionRaw = PencilTapShortcutAction.redo.rawValue
+    @AppStorage("settings.fingerTap4Action") private var fingerTap4ActionRaw = PencilTapShortcutAction.selectTextTool.rawValue
     @State private var searchQuery = ""
-    @State private var toolDockPlacement: ToolDockPlacement = .bottom
+    @State private var renameArtLayerId: UUID?
+    @State private var renameArtLayerDraft: String = ""
+    @State private var isCanvasStateDirty = false
+    @State private var isPreviewDirty = false
+    @State private var lastPreviewRenderAt: Date = .distantPast
     private let minScale: CGFloat = 0.2
     private let maxScale: CGFloat = 8
     private let virtualCanvasSize: CGFloat = 120000
     private let paletteColors: [Color] = [.black, .blue, .green, .yellow, .red]
-    /// Ліва колонка: інструменти (2 ряди) + слої; ширина контенту карток.
-    private let toolDockLeftSidebarWidth: CGFloat = 296
-    private let toolDockLeftOuterLeading: CGFloat = 12
-    private let toolDockLeftGapToCanvas: CGFloat = 10
-    private var toolDockLeftColumnTotalWidth: CGFloat {
-        toolDockLeftOuterLeading + toolDockLeftSidebarWidth + toolDockLeftGapToCanvas
-    }
-    private let toolDockBottomHeight: CGFloat = 220
+    private let previewRenderThrottleSeconds: TimeInterval = 6
+    private let previewLiveRenderTextLineLimit = 1800
+    /// Ширина плаваючої колонки інструментів і слоїв (зверху зліва).
+    private let toolDockFloatingColumnWidth: CGFloat = 280
     private static let docxUTType: UTType = UTType("org.openxmlformats.wordprocessingml.document")
         ?? UTType(filenameExtension: "docx")
         ?? .data
+    private static let svgUTType: UTType = UTType("public.svg-image")
+        ?? UTType("public.svg")
+        ?? UTType("image/svg+xml")
+        ?? .xml
 
     var body: some View {
         GeometryReader { geo in
@@ -93,54 +108,105 @@ struct ContentView: View {
         mainEditorContent(geo: geo)
     }
 
-    @ViewBuilder
     private func mainEditorContent(geo: GeometryProxy) -> some View {
-        Group {
-            if toolDockPlacement == .leading {
-                HStack(alignment: .top, spacing: toolDockLeftGapToCanvas) {
-                    leadingSidebarColumn(canvasHeight: geo.size.height)
-                        .padding(.leading, toolDockLeftOuterLeading)
-                        .padding(.top, 8)
-                    canvasStack(
-                        size: CGSize(width: max(1, geo.size.width - toolDockLeftColumnTotalWidth), height: geo.size.height)
-                    )
-                }
-            } else {
-                VStack(spacing: 0) {
-                    canvasStack(
-                        size: CGSize(width: geo.size.width, height: max(1, geo.size.height - toolDockBottomHeight))
-                    )
-                    fixedToolDockPanel(canvasSize: geo.size)
-                }
-            }
-        }
+        editorWithNavigation(geo: geo)
+    }
+
+    private func editorMainLayout(geo: GeometryProxy) -> some View {
+        canvasStack(size: geo.size)
+    }
+
+    private func editorWithSpatialChrome(geo: GeometryProxy) -> some View {
+        editorMainLayout(geo: geo)
             .coordinateSpace(name: EditorCanvasCoordinateSpace.name)
-            .overlay(alignment: .topTrailing) { importButton.padding(.top, 12).padding(.trailing, 12) }
-            .overlay(alignment: .topTrailing) { searchPanel.padding(.top, 64).padding(.trailing, 12) }
-            .overlay(alignment: .topLeading) {
-                if toolDockPlacement != .leading {
-                    layersPanel(embedded: false).padding(12)
-                }
+            .overlay(alignment: .topTrailing) { editorTopTrailingChrome }
+            .overlay(alignment: .topLeading) { editorFloatingToolsAndLayers(geo: geo) }
+            .overlay { editorTextCompositionOverlays(geo: geo) }
+    }
+
+    private var editorTopTrailingChrome: some View {
+        VStack(alignment: .trailing, spacing: 10) {
+            HStack(spacing: 10) {
+                ImportButtonView(showImportPicker: $showImportPicker)
+                ExportMenuButtonView(exportKinds: CanvasExportKind.allCases, onSelect: requestExport)
+                canvasSettingsButton
             }
-            .overlay { if editingTextLineId != nil { editTextLineOverlay(size: geo.size) } }
-            .overlay { if isComposingNewText { composingTextInlineOverlay(size: geo.size) } }
+            SearchPanelView(searchQuery: $searchQuery)
+        }
+        .padding(.top, 12)
+        .padding(.trailing, 12)
+    }
+
+    @ViewBuilder
+    private func editorFloatingToolsAndLayers(geo: GeometryProxy) -> some View {
+        let w = min(toolDockFloatingColumnWidth, geo.size.width - 20)
+        let listH = min(320, max(120, geo.size.height * 0.42))
+        VStack(alignment: .leading, spacing: 10) {
+            toolDockContent(paletteMaxWidth: w)
+            layersPanelOverlay(panelWidth: w, listMaxHeight: listH)
+        }
+        .padding(.leading, 12)
+        .padding(.top, 12)
+    }
+
+    @ViewBuilder
+    private func editorTextCompositionOverlays(geo: GeometryProxy) -> some View {
+        if editingTextLineId != nil {
+            editTextLineOverlay(size: geo.size)
+        }
+        if isComposingNewText {
+            composingTextInlineOverlay(size: geo.size)
+        }
+        if editingTextLineId == nil, !isComposingNewText {
+            selectedCanvasActionsOverlay(size: geo.size)
+        }
+    }
+
+    private func editorWithFileAndObservers(geo: GeometryProxy) -> some View {
+        editorWithSpatialChrome(geo: geo)
             .fileImporter(isPresented: $showImportPicker, allowedContentTypes: [Self.docxUTType], allowsMultipleSelection: false) { result in
                 guard case .success(let urls) = result, let url = urls.first else { return }
                 importDOCX(from: url)
+            }
+            .fileExporter(
+                isPresented: $showExportPicker,
+                document: exportDocument,
+                contentType: exportContentType,
+                defaultFilename: exportDefaultFilename
+            ) { result in
+                if case .failure(let error) = result {
+                    exportErrorMessage = error.localizedDescription
+                }
+            }
+            .alert("Експорт не вдався", isPresented: Binding(
+                get: { exportErrorMessage != nil },
+                set: { if !$0 { exportErrorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { exportErrorMessage = nil }
+            } message: {
+                Text(exportErrorMessage ?? "Спробуй ще раз.")
             }
             .onAppear {
                 if let meta = projectStore.metadata(for: projectId) {
                     projectTitle = meta.title
                 }
                 loadCanvasStateIfNeeded()
+                ensureArtLayersReady()
+                markCanvasStateDirty(updatePreview: false)
             }
-            .onChange(of: scale) { _ in saveCanvasState() }
-            .onChange(of: offset) { _ in saveCanvasState() }
-            .onChange(of: hiddenStrokeIds) { _ in saveCanvasState() }
-            .onChange(of: hiddenTextLineIds) { _ in saveCanvasState() }
-            .onChange(of: customLayerNames) { _ in saveCanvasState() }
-            .onChange(of: toolDockPlacement) { _ in saveCanvasState() }
-            .onReceive(autoSaveTimer) { _ in saveCanvasState() }
+            .onChange(of: scale) { _ in markCanvasStateDirty(updatePreview: false) }
+            .onChange(of: offset) { _ in markCanvasStateDirty(updatePreview: false) }
+            .onChange(of: hiddenStrokeIds) { _ in markCanvasStateDirty(updatePreview: true) }
+            .onChange(of: hiddenTextLineIds) { _ in markCanvasStateDirty(updatePreview: true) }
+            .onChange(of: artLayers) { _ in markCanvasStateDirty(updatePreview: true) }
+            .onChange(of: activeLayerId) { _ in markCanvasStateDirty(updatePreview: false) }
+            .onChange(of: hiddenArtLayerIds) { _ in markCanvasStateDirty(updatePreview: true) }
+            .onChange(of: canvasBackground) { _ in markCanvasStateDirty(updatePreview: true) }
+            .onReceive(autoSaveTimer) { _ in saveCanvasStateIfNeeded() }
+    }
+
+    private func editorWithNavigation(geo: GeometryProxy) -> some View {
+        editorWithFileAndObservers(geo: geo)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -149,27 +215,67 @@ struct ContentView: View {
                         .submitLabel(.done)
                         .onSubmit { projectStore.renameProject(id: projectId, title: projectTitle) }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Menu {
-                        Picker("Панель інструментів", selection: $toolDockPlacement) {
-                            Label("Зліва (інструменти і слої)", systemImage: "rectangle.lefthalf.filled").tag(ToolDockPlacement.leading)
-                            Label("Знизу (горизонтально)", systemImage: "rectangle.bottomhalf.filled").tag(ToolDockPlacement.bottom)
-                        }
-                    } label: {
-                        Image(systemName: toolDockPlacement == .leading ? "sidebar.left" : "rectangle.bottomhalf.filled")
-                    }
-                }
+            }
+            .sheet(isPresented: renameArtLayerSheetPresented) {
+                renameArtLayerSheet
             }
             .onDisappear {
                 projectStore.renameProject(id: projectId, title: projectTitle)
-                saveCanvasState()
+                saveCanvasStateIfNeeded(force: true)
             }
+    }
+
+    private var renameArtLayerSheetPresented: Binding<Bool> {
+        Binding(
+            get: { renameArtLayerId != nil },
+            set: { if !$0 { renameArtLayerId = nil } }
+        )
+    }
+
+    private var renameArtLayerSheet: some View {
+        NavigationStack {
+            Form {
+                TextField("Назва шару", text: $renameArtLayerDraft)
+                    .submitLabel(.done)
+                    .onSubmit { commitRenameArtLayer() }
+            }
+            .navigationTitle("Шар")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Скасувати") { renameArtLayerId = nil }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Готово") { commitRenameArtLayer() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        .presentationCompactAdaptation(.sheet)
+    }
+
+    private func openRenameArtLayerSheet(_ layer: CanvasArtLayer) {
+        renameArtLayerId = layer.id
+        renameArtLayerDraft = layer.name
+    }
+
+    private func commitRenameArtLayer() {
+        guard let id = renameArtLayerId,
+              let i = artLayers.firstIndex(where: { $0.id == id }) else {
+            renameArtLayerId = nil
+            return
+        }
+        let t = renameArtLayerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty {
+            artLayers[i].name = t
+        }
+        renameArtLayerId = nil
     }
 
     private func canvasStack(size: CGSize) -> some View {
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         return ZStack {
-            Color.white
+            canvasBackgroundLayer(size: size)
             editorDrawingCanvas(center: center)
             editorTouchSurface()
         }
@@ -178,81 +284,304 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func leadingSidebarColumn(canvasHeight: CGFloat) -> some View {
-        let toolChrome = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        let layersChrome = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        let toolInnerW = toolDockLeftSidebarWidth - 20
-        VStack(alignment: .leading, spacing: 12) {
-            toolDockContent(
-                dockFrameSize: CGSize(width: toolInnerW, height: 200),
-                placement: .leading
-            )
-            .padding(10)
-            .frame(width: toolDockLeftSidebarWidth - 4, alignment: .topLeading)
-            .background { toolChrome.fill(Material.ultraThinMaterial) }
-            .overlay { toolChrome.stroke(Color.black.opacity(0.08), lineWidth: 1) }
-            .shadow(color: Color.black.opacity(0.1), radius: 12, x: 4, y: 4)
+    private func canvasBackgroundLayer(size: CGSize) -> some View {
+        let contentStepDots: CGFloat = 20
+        let contentStepLines: CGFloat = 28
+        let stepDots = max(2, contentStepDots * scale)
+        let stepLines = max(2, contentStepLines * scale)
 
-            layersPanel(embedded: true)
-                .padding(10)
-                .frame(width: toolDockLeftSidebarWidth - 4, alignment: .topLeading)
-                .frame(maxHeight: .infinity, alignment: .topLeading)
-                .background { layersChrome.fill(Material.ultraThinMaterial) }
-                .overlay { layersChrome.stroke(Color.black.opacity(0.08), lineWidth: 1) }
-                .shadow(color: Color.black.opacity(0.08), radius: 10, x: 3, y: 3)
+        ZStack {
+            Color.white
+            switch canvasBackground {
+            case .blank:
+                EmptyView()
+            case .dots:
+                Canvas { context, _ in
+                    let radius: CGFloat = 0.9
+                    let fill = Color.black.opacity(0.16)
+                    var x: CGFloat = anchoredPatternStart(offset.width, step: stepDots)
+                    while x <= size.width {
+                        var y: CGFloat = anchoredPatternStart(offset.height, step: stepDots)
+                        while y <= size.height {
+                            let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
+                            context.fill(Path(ellipseIn: rect), with: .color(fill))
+                            y += stepDots
+                        }
+                        x += stepDots
+                    }
+                }
+            case .lines:
+                Canvas { context, _ in
+                    let color = Color.black.opacity(0.08)
+                    var y: CGFloat = anchoredPatternStart(offset.height, step: stepLines)
+                    while y <= size.height {
+                        var p = Path()
+                        p.move(to: CGPoint(x: 0, y: y))
+                        p.addLine(to: CGPoint(x: size.width, y: y))
+                        context.stroke(p, with: .color(color), lineWidth: 1)
+                        y += stepLines
+                    }
+                }
+            case .grid:
+                Canvas { context, _ in
+                    let color = Color.black.opacity(0.09)
+                    var y: CGFloat = anchoredPatternStart(offset.height, step: stepLines)
+                    while y <= size.height {
+                        var p = Path()
+                        p.move(to: CGPoint(x: 0, y: y))
+                        p.addLine(to: CGPoint(x: size.width, y: y))
+                        context.stroke(p, with: .color(color), lineWidth: 1)
+                        y += stepLines
+                    }
+                    var x: CGFloat = anchoredPatternStart(offset.width, step: stepLines)
+                    while x <= size.width {
+                        var p = Path()
+                        p.move(to: CGPoint(x: x, y: 0))
+                        p.addLine(to: CGPoint(x: x, y: size.height))
+                        context.stroke(p, with: .color(color), lineWidth: 1)
+                        x += stepLines
+                    }
+                }
+            }
         }
-        .frame(width: toolDockLeftSidebarWidth, height: canvasHeight, alignment: .topLeading)
+    }
+
+    private func anchoredPatternStart(_ offsetValue: CGFloat, step: CGFloat) -> CGFloat {
+        var start = offsetValue.truncatingRemainder(dividingBy: step)
+        if start > 0 { start -= step }
+        return start
+    }
+
+    private var pencilTap2Action: PencilTapShortcutAction {
+        get { PencilTapShortcutAction(rawValue: pencilTap2ActionRaw) ?? .selectTextTool }
+        set { pencilTap2ActionRaw = newValue.rawValue }
+    }
+
+    private var fingerTap2Action: PencilTapShortcutAction {
+        get { PencilTapShortcutAction(rawValue: fingerTap2ActionRaw) ?? .undo }
+        set { fingerTap2ActionRaw = newValue.rawValue }
+    }
+
+    private var fingerTap3Action: PencilTapShortcutAction {
+        get { PencilTapShortcutAction(rawValue: fingerTap3ActionRaw) ?? .redo }
+        set { fingerTap3ActionRaw = newValue.rawValue }
+    }
+
+    private var fingerTap4Action: PencilTapShortcutAction {
+        get { PencilTapShortcutAction(rawValue: fingerTap4ActionRaw) ?? .selectTextTool }
+        set { fingerTap4ActionRaw = newValue.rawValue }
+    }
+
+    private var canvasSettingsButton: some View {
+        Button {
+            showCanvasSettings = true
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 18, weight: .semibold))
+                .frame(width: 40, height: 40)
+                .background(Color(UIColor.systemBackground), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(UIColor.separator).opacity(0.3), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Налаштування канви")
+        .popover(isPresented: $showCanvasSettings) { canvasSettingsPopoverContent }
+    }
+
+    private var canvasSettingsPopoverContent: some View {
+        NavigationStack {
+            ScrollView([.vertical, .horizontal]) {
+                VStack(alignment: .leading, spacing: 18) {
+                    canvasBackgroundSettingsSection
+                        .frame(width: 260, alignment: .leading)
+                    applePencilSettingsSection
+                        .frame(width: 420, alignment: .leading)
+                    interactionSettingsSection
+                        .frame(width: 420, alignment: .leading)
+                }
+                .padding(16)
+            }
+            .navigationTitle("Налаштування")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Готово") { showCanvasSettings = false }
+                }
+            }
+        }
+        .frame(minWidth: 280, idealWidth: 300, maxWidth: 320, minHeight: 420)
+        .presentationCompactAdaptation(.sheet)
+    }
+
+    private var canvasBackgroundSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Фон канви")
+                .font(.subheadline.weight(.semibold))
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                ForEach(CanvasBackgroundKind.allCases) { kind in
+                    canvasBackgroundTile(kind: kind)
+                }
+            }
+        }
+    }
+
+    private func canvasBackgroundTile(kind: CanvasBackgroundKind) -> some View {
+        Button {
+            canvasBackground = kind
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                canvasBackgroundSwatch(kind: kind)
+                    .frame(height: 72)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(canvasBackground == kind ? Color.accentColor : Color.black.opacity(0.1), lineWidth: canvasBackground == kind ? 2 : 1)
+                    )
+                Text(kind.title)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(canvasBackground == kind ? Color.accentColor.opacity(0.08) : Color(UIColor.secondarySystemBackground))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var applePencilSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Apple Pencil")
+                .font(.subheadline.weight(.semibold))
+            PencilTapActionRow(title: "2 тапи олівцем", selection: pencilTap2ActionBinding)
+        }
+    }
+
+    private var interactionSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Interaction")
+                .font(.subheadline.weight(.semibold))
+            PencilTapActionRow(title: "2 пальці: 1 тап", selection: fingerTap2ActionBinding)
+            PencilTapActionRow(title: "3 пальці: 1 тап", selection: fingerTap3ActionBinding)
+            PencilTapActionRow(title: "4 пальці: 1 тап", selection: fingerTap4ActionBinding)
+        }
+    }
+
+    private var pencilTap2ActionBinding: Binding<PencilTapShortcutAction> {
+        Binding(
+            get: { PencilTapShortcutAction(rawValue: pencilTap2ActionRaw) ?? .selectTextTool },
+            set: { pencilTap2ActionRaw = $0.rawValue }
+        )
+    }
+
+    private var fingerTap2ActionBinding: Binding<PencilTapShortcutAction> {
+        Binding(
+            get: { PencilTapShortcutAction(rawValue: fingerTap2ActionRaw) ?? .undo },
+            set: { fingerTap2ActionRaw = $0.rawValue }
+        )
+    }
+
+    private var fingerTap3ActionBinding: Binding<PencilTapShortcutAction> {
+        Binding(
+            get: { PencilTapShortcutAction(rawValue: fingerTap3ActionRaw) ?? .redo },
+            set: { fingerTap3ActionRaw = $0.rawValue }
+        )
+    }
+
+    private var fingerTap4ActionBinding: Binding<PencilTapShortcutAction> {
+        Binding(
+            get: { PencilTapShortcutAction(rawValue: fingerTap4ActionRaw) ?? .selectTextTool },
+            set: { fingerTap4ActionRaw = $0.rawValue }
+        )
     }
 
     @ViewBuilder
-    private func fixedToolDockPanel(canvasSize: CGSize) -> some View {
-        let bottomShape = UnevenRoundedRectangle(
-            cornerRadii: .init(topLeading: 18, bottomLeading: 0, bottomTrailing: 0, topTrailing: 18),
-            style: .continuous
-        )
-        toolDockContent(
-            dockFrameSize: CGSize(width: canvasSize.width, height: toolDockBottomHeight),
-            placement: .bottom
-        )
-        .padding(8)
-        .frame(width: canvasSize.width, height: toolDockBottomHeight, alignment: .top)
-        .background {
-            bottomShape.fill(Material.ultraThinMaterial)
-        }
-        .overlay {
-            bottomShape.stroke(Color.black.opacity(0.08), lineWidth: 1)
+    private func canvasBackgroundSwatch(kind: CanvasBackgroundKind) -> some View {
+        ZStack {
+            Color.white
+            switch kind {
+            case .blank:
+                EmptyView()
+            case .dots:
+                Canvas { context, size in
+                    let spacing: CGFloat = 12
+                    let radius: CGFloat = 0.8
+                    let fill = Color.black.opacity(0.18)
+                    var x: CGFloat = 0
+                    while x <= size.width {
+                        var y: CGFloat = 0
+                        while y <= size.height {
+                            context.fill(Path(ellipseIn: CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)), with: .color(fill))
+                            y += spacing
+                        }
+                        x += spacing
+                    }
+                }
+            case .lines:
+                Canvas { context, size in
+                    let spacing: CGFloat = 14
+                    let color = Color.black.opacity(0.11)
+                    var y: CGFloat = 0
+                    while y <= size.height {
+                        var p = Path()
+                        p.move(to: CGPoint(x: 0, y: y))
+                        p.addLine(to: CGPoint(x: size.width, y: y))
+                        context.stroke(p, with: .color(color), lineWidth: 1)
+                        y += spacing
+                    }
+                }
+            case .grid:
+                Canvas { context, size in
+                    let spacing: CGFloat = 14
+                    let color = Color.black.opacity(0.11)
+                    var y: CGFloat = 0
+                    while y <= size.height {
+                        var p = Path()
+                        p.move(to: CGPoint(x: 0, y: y))
+                        p.addLine(to: CGPoint(x: size.width, y: y))
+                        context.stroke(p, with: .color(color), lineWidth: 1)
+                        y += spacing
+                    }
+                    var x: CGFloat = 0
+                    while x <= size.width {
+                        var p = Path()
+                        p.move(to: CGPoint(x: x, y: 0))
+                        p.addLine(to: CGPoint(x: x, y: size.height))
+                        context.stroke(p, with: .color(color), lineWidth: 1)
+                        x += spacing
+                    }
+                }
+            }
         }
     }
 
     private func editorDrawingCanvas(center: CGPoint) -> some View {
-        ZStack {
-            EditorImportedTextCanvasLayer(
-                center: center,
-                scale: scale,
-                offset: offset,
-                virtualCanvasSize: virtualCanvasSize,
-                importedTextLines: importedTextLines,
-                hiddenTextLineIds: hiddenTextLineIds,
-                searchQuery: searchQuery,
-                selectedTextLineIds: selectedTextLineIds,
-                textSelectionRect: textSelectionRect
-            )
-            EditorStrokesCanvasLayer(
-                scale: scale,
-                offset: offset,
-                strokes: strokes,
-                hiddenStrokeIds: hiddenStrokeIds,
-                currentStroke: currentStroke,
-                drawingColor: drawingColor,
-                drawingOpacity: drawingOpacity,
-                drawingStyle: drawingStyle,
-                drawingWidth: drawingWidth,
-                drawingTool: drawingTool,
-                interactionMode: interactionMode,
-                selectedItemBounds: (drawingTool == .cursor && interactionMode == .draw) ? selectedCanvasItemBounds() : nil,
-                cursorMarqueeRect: (drawingTool == .cursor && interactionMode == .draw) ? cursorSelectionRect : nil
-            )
-        }
+        EditorCompositeCanvasLayer(
+            center: center,
+            scale: scale,
+            offset: offset,
+            virtualCanvasSize: virtualCanvasSize,
+            artLayers: artLayers,
+            strokes: strokes,
+            hiddenStrokeIds: hiddenStrokeIds,
+            importedTextLines: importedTextLines,
+            hiddenTextLineIds: hiddenTextLineIds,
+            hiddenArtLayerIds: hiddenArtLayerIds,
+            searchQuery: searchQuery,
+            selectedTextLineIds: selectedTextLineIds,
+            textSelectionRect: interactionMode == .text ? textSelectionRect : cursorSelectionRect,
+            currentStroke: currentStroke,
+            drawingColor: drawingColor,
+            drawingOpacity: drawingOpacity,
+            drawingStyle: drawingStyle,
+            drawingWidth: drawingWidth,
+            drawingTool: drawingTool,
+            interactionMode: interactionMode,
+            selectedItemBounds: selectedCanvasItemBounds(),
+            cursorMarqueeRect: nil
+        )
     }
 
     private func editorTouchSurface() -> some View {
@@ -296,6 +625,14 @@ struct ContentView: View {
                 }
                 guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
                 let cp = viewToContent(p)
+                if isPointNearResizeHandle(cp), !selectedCanvasLayerIds.isEmpty {
+                    cursorPencilResizing = true
+                    lastCursorPencilPointInView = p
+                    hasCapturedTextDragUndo = false
+                    textSelectionStartPoint = nil
+                    textSelectionRect = nil
+                    return
+                }
                 if let hit = textLineAt(contentPoint: cp), selectedTextLineIds.contains(hit.id), !selectedTextLineIds.isEmpty {
                     pencilDraggingTextSelection = true
                     lastPencilPointInView = p
@@ -313,13 +650,16 @@ struct ContentView: View {
                     selectCanvasItem(at: viewToContent(p))
                     return
                 }
-                guard interactionMode == .text, editingTextLineId == nil else { return }
-                if let line = textLineAt(contentPoint: viewToContent(p)) {
-                    selectedTextLineId = line.id
-                    selectedTextLineIds = [line.id]
+                guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
+                let cp = viewToContent(p)
+                if let line = textLineAt(contentPoint: cp) {
+                    selectCanvasItem(at: cp)
                 } else {
                     selectedTextLineId = nil
                     selectedTextLineIds = []
+                    selectedCanvasItem = nil
+                    selectedCanvasLayerIds = []
+                    startComposingNewText(at: cp)
                 }
             },
             onDoubleTap: { p in
@@ -330,16 +670,11 @@ struct ContentView: View {
                     splitWordFromDoubleTap(at: cp, in: line)
                 }
             },
-            onPencilDoubleTap: { p in
-                guard interactionMode == .text, editingTextLineId == nil else { return }
-                let cp = viewToContent(p)
-                if let line = textLineAt(contentPoint: cp) {
-                    selectedTextLineId = line.id
-                    selectedTextLineIds = [line.id]
-                    startEditingSelectedTextLine()
-                } else {
-                    startComposingNewText(at: cp)
-                }
+            onPencilDoubleTap: {
+                performShortcutAction(pencilTap2Action)
+            },
+            onMultiFingerTap: { fingerCount, _ in
+                performFingerTapAction(fingerCount: fingerCount)
             },
             onPencilMoved: { p in
                 if interactionMode == .draw {
@@ -368,14 +703,22 @@ struct ContentView: View {
                         return
                     }
                     if drawingTool == .eraser {
-                        _ = eraseStrokes(at: viewToContent(p))
+                        if eraseStrokes(at: viewToContent(p)) {
+                            markCanvasStateDirty(updatePreview: true)
+                        }
                     } else {
                         currentStroke.append(viewToContent(p))
                     }
                     return
                 }
                 guard interactionMode == .text else { return }
-                if pencilDraggingTextSelection {
+                if cursorPencilResizing {
+                    guard let last = lastCursorPencilPointInView else { return }
+                    if !hasCapturedTextDragUndo { pushUndoSnapshot(); hasCapturedTextDragUndo = true }
+                    let delta = CGSize(width: p.x - last.x, height: p.y - last.y)
+                    resizeSelectedCanvasItems(delta: delta)
+                    lastCursorPencilPointInView = p
+                } else if pencilDraggingTextSelection {
                     guard let last = lastPencilPointInView else { return }
                     if !hasCapturedTextDragUndo {
                         pushUndoSnapshot()
@@ -387,6 +730,7 @@ struct ContentView: View {
                     for i in importedTextLines.indices where selectedTextLineIds.contains(importedTextLines[i].id) {
                         importedTextLines[i].position = CGPoint(x: importedTextLines[i].position.x + dx, y: importedTextLines[i].position.y + dy)
                     }
+                    markCanvasStateDirty(updatePreview: true)
                     lastPencilPointInView = p
                 } else if let start = textSelectionStartPoint {
                     let c = viewToContent(p)
@@ -418,12 +762,19 @@ struct ContentView: View {
                     if drawingTool == .eraser { hasCapturedEraseUndo = false; return }
                     if currentStroke.count > 1 {
                         pushUndoSnapshot()
-                        strokes.append(StrokeItem(points: currentStroke, color: drawingColor, width: drawingWidth, style: drawingStyle, opacity: drawingOpacity))
+                        strokes.append(StrokeItem(layerId: activeLayerId, points: currentStroke, color: drawingColor, width: drawingWidth, style: drawingStyle, opacity: drawingOpacity))
+                        markCanvasStateDirty(updatePreview: true)
                     }
                     currentStroke = []
                     return
                 }
                 guard interactionMode == .text else { return }
+                if cursorPencilResizing {
+                    cursorPencilResizing = false
+                    lastCursorPencilPointInView = nil
+                    hasCapturedTextDragUndo = false
+                    return
+                }
                 if pencilDraggingTextSelection {
                     pencilDraggingTextSelection = false
                     lastPencilPointInView = nil
@@ -462,12 +813,17 @@ struct ContentView: View {
                     return
                 }
                 guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
-                if let hit = textLineAt(contentPoint: viewToContent(p)) {
+                let cp = viewToContent(p)
+                if isPointNearResizeHandle(cp), !selectedCanvasLayerIds.isEmpty {
+                    resizingCanvasItem = true
+                    hasCapturedTextDragUndo = false
+                    return
+                }
+                if let hit = textLineAt(contentPoint: cp) {
                     if selectedTextLineIds.contains(hit.id) {
                         draggingTextLineId = hit.id
                     } else {
-                        selectedTextLineId = hit.id
-                        selectedTextLineIds = [hit.id]
+                        selectCanvasItem(at: cp)
                         draggingTextLineId = hit.id
                     }
                     hasCapturedTextDragUndo = false
@@ -499,7 +855,10 @@ struct ContentView: View {
                     return
                 }
                 guard interactionMode == .text, editingTextLineId == nil, !isComposingNewText else { return }
-                if let dragId = draggingTextLineId, importedTextLines.contains(where: { $0.id == dragId }) {
+                if resizingCanvasItem {
+                    if !hasCapturedTextDragUndo { pushUndoSnapshot(); hasCapturedTextDragUndo = true }
+                    resizeSelectedCanvasItems(delta: t)
+                } else if let dragId = draggingTextLineId, importedTextLines.contains(where: { $0.id == dragId }) {
                     if !hasCapturedTextDragUndo {
                         pushUndoSnapshot()
                         detachSelectedTextLinesToNewDocumentIfNeeded()
@@ -510,6 +869,7 @@ struct ContentView: View {
                     for i in importedTextLines.indices where selectedTextLineIds.contains(importedTextLines[i].id) {
                         importedTextLines[i].position = CGPoint(x: importedTextLines[i].position.x + dx, y: importedTextLines[i].position.y + dy)
                     }
+                    markCanvasStateDirty(updatePreview: true)
                 } else {
                     offset = CGSize(width: offset.width + t.width, height: offset.height + t.height)
                 }
@@ -535,10 +895,9 @@ struct ContentView: View {
         )
     }
 
-    private func toolDockContent(dockFrameSize: CGSize, placement: ToolDockPlacement) -> some View {
+    private func toolDockContent(paletteMaxWidth: CGFloat) -> some View {
         ToolDockContentView(
-            dockFrameSize: dockFrameSize,
-            placement: placement,
+            paletteMaxWidth: paletteMaxWidth,
             undoStackIsEmpty: undoStack.isEmpty,
             redoStackIsEmpty: redoStack.isEmpty,
             interactionMode: interactionMode,
@@ -551,16 +910,8 @@ struct ContentView: View {
             paletteColors: paletteColors,
             onUndo: { undo() },
             onRedo: { redo() },
-            onTextMode: { interactionMode = .text },
-            onToolSelected: { tool in
-                interactionMode = .draw
-                drawingTool = tool
-                if tool != .eraser, tool != .cursor { drawingWidth = tool.defaultWidth }
-                if tool != .cursor {
-                    selectedCanvasItem = nil
-                    selectedCanvasLayerIds = []
-                }
-            },
+            onTextMode: { activateTextTool() },
+            onToolSelected: { tool in activateDrawingTool(tool) },
             onDrawingWidthChanged: {
                 drawingWidth = $0
                 applyWidthToSelectedLayers($0)
@@ -586,33 +937,20 @@ struct ContentView: View {
         )
     }
 
-    private var importButton: some View {
-        ImportButtonView(showImportPicker: $showImportPicker)
-    }
-
-    private var searchPanel: some View {
-        SearchPanelView(searchQuery: $searchQuery)
-    }
-
-
-
-    private func layersPanel(embedded: Bool) -> some View {
-        LayersPanelView(
-            listMaxHeight: embedded ? nil : 280,
-            useSidebarColumnWidth: embedded,
-            canvasLayers: canvasLayers,
-            layerGroupSections: layerGroupSections,
-            selectedLayerIdsForGrouping: selectedLayerIdsForGrouping,
-            createGroupFromSelection: createGroupFromSelection,
-            ungroup: ungroup,
-            toggleGroupExpansion: toggleGroupExpansion,
-            toggleGroupVisibility: toggleGroupVisibility,
-            isSectionVisible: isSectionVisible,
-            toggleLayerSelectionForGrouping: toggleLayerSelectionForGrouping,
-            layerNameBinding: layerNameBinding,
-            groupNameBinding: groupNameBinding,
-            toggleLayerVisibility: toggleLayerVisibility,
-            isLayerVisible: isLayerVisible
+    private func layersPanelOverlay(panelWidth: CGFloat, listMaxHeight: CGFloat) -> some View {
+        ArtLayersPanelView(
+            listMaxHeight: listMaxHeight,
+            useSidebarColumnWidth: true,
+            floatOnCanvas: true,
+            panelWidth: panelWidth,
+            artLayers: artLayers,
+            activeLayerId: $activeLayerId,
+            hiddenArtLayerIds: $hiddenArtLayerIds,
+            onAddLayer: addArtLayer,
+            onDeleteLayer: deleteArtLayer,
+            onMoveLayerTowardFront: moveArtLayerTowardFront,
+            onMoveLayerTowardBack: moveArtLayerTowardBack,
+            onRenameLayer: openRenameArtLayerSheet
         )
     }
 
@@ -630,7 +968,6 @@ struct ContentView: View {
                     .background(Color.white)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 HStack {
-                    Button("Винести виділене") { splitSelectedTextFromEditingLine() }
                     Button("Зберегти") { commitEditingTextLine() }
                     Button("Скасувати") { editingTextLineId = nil; editingTextLineText = "" }.foregroundStyle(.secondary)
                 }
@@ -665,6 +1002,53 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private func selectedCanvasActionsOverlay(size: CGSize) -> some View {
+        if !selectedCanvasLayerIds.isEmpty,
+           let bounds = selectedCanvasItemBounds() {
+            let o = contentToView(CGPoint(x: bounds.midX, y: bounds.maxY))
+            let y = min(max(o.y + 18, 56), size.height - 48)
+            let x = min(max(o.x, 70), size.width - 70)
+
+            HStack(spacing: 8) {
+                Button(role: .destructive) {
+                    deleteSelectedCanvasSelection()
+                } label: {
+                    Label("Видалити", systemImage: "trash")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+
+                if hasTextLayerSelection {
+                    Button {
+                        startEditingFirstSelectedTextLine()
+                    } label: {
+                        Label("Редагувати", systemImage: "pencil")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .position(x: x, y: y)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var hasTextLayerSelection: Bool {
+        selectedCanvasLayerIds.contains { $0.hasPrefix("textdoc-") }
+    }
+
+    private func startEditingFirstSelectedTextLine() {
+        if let current = selectedTextLineId {
+            if !selectedTextLineIds.contains(current) {
+                selectedTextLineId = selectedTextLineIds.first
+            }
+        } else {
+            selectedTextLineId = selectedTextLineIds.first
+        }
+        startEditingSelectedTextLine()
+    }
+
     private func importDOCX(from url: URL) {
         guard url.startAccessingSecurityScopedResource() else { return }
         defer { url.stopAccessingSecurityScopedResource() }
@@ -678,7 +1062,7 @@ struct ContentView: View {
         var lines: [ImportedTextLine] = []
         for p in paragraphs {
             for t in wrapText(p, maxChars: 64) {
-                lines.append(ImportedTextLine(documentId: documentId, groupId: groupId, order: order, text: t, position: CGPoint(x: topLeft.x, y: y), fontSize: 18, color: .black))
+                lines.append(ImportedTextLine(documentId: documentId, groupId: groupId, order: order, layerId: activeLayerId, text: t, position: CGPoint(x: topLeft.x, y: y), fontSize: 18, color: .black))
                 y += 24
                 order += 1
             }
@@ -687,6 +1071,48 @@ struct ContentView: View {
         guard !lines.isEmpty else { return }
         pushUndoSnapshot()
         importedTextLines.append(contentsOf: lines)
+        markCanvasStateDirty(updatePreview: true)
+    }
+
+    private func requestExport(_ kind: CanvasExportKind) {
+        let snapshot = CanvasExportSnapshot(
+            background: canvasBackground,
+            artLayers: artLayers,
+            hiddenArtLayerIds: hiddenArtLayerIds,
+            strokes: strokes,
+            hiddenStrokeIds: hiddenStrokeIds,
+            textLines: importedTextLines,
+            hiddenTextLineIds: hiddenTextLineIds
+        )
+        guard let data = CanvasExportRenderer.data(for: kind, snapshot: snapshot) else {
+            exportErrorMessage = "Канва порожня або формат не підтримується."
+            return
+        }
+        exportDocument = CanvasExportFileDocument(data: data)
+        exportContentType = contentType(for: kind)
+        exportDefaultFilename = "\(normalizedExportName()).\(kind.fileExtension)"
+        showExportPicker = true
+    }
+
+    private func contentType(for kind: CanvasExportKind) -> UTType {
+        switch kind {
+        case .jpg:
+            return .jpeg
+        case .png:
+            return .png
+        case .svg:
+            return Self.svgUTType
+        case .pdfFlattened, .pdfVector:
+            return .pdf
+        }
+    }
+
+    private func normalizedExportName() -> String {
+        let raw = projectTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = raw.isEmpty ? "Canvas" : raw
+        let filtered = base.replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        return filtered
     }
 
     private func wrapText(_ text: String, maxChars: Int) -> [String] {
@@ -708,12 +1134,18 @@ struct ContentView: View {
     }
 
     private func textLineAt(contentPoint: CGPoint) -> ImportedTextLine? {
-        importedTextLines.last { !hiddenTextLineIds.contains($0.id) && boundsForTextLine($0).contains(contentPoint) }
+        for artLayer in artLayers.reversed() {
+            if hiddenArtLayerIds.contains(artLayer.id) { continue }
+            let candidates = importedTextLines.filter { $0.layerId == artLayer.id && !hiddenTextLineIds.contains($0.id) }
+            if let hit = candidates.reversed().first(where: { boundsForTextLine($0).contains(contentPoint) }) {
+                return hit
+            }
+        }
+        return nil
     }
 
     private func boundsForTextLine(_ line: ImportedTextLine) -> CGRect {
-        let width = (line.text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: line.fontSize)]).width
-        return CGRect(x: line.position.x, y: line.position.y, width: width, height: line.fontSize * 1.3)
+        EditorCanvasHelpers.boundsForTextLine(line)
     }
 
     private func startEditingSelectedTextLine() {
@@ -732,6 +1164,7 @@ struct ContentView: View {
         if importedTextLines[idx].text != editingTextLineText {
             pushUndoSnapshot()
             importedTextLines[idx].text = editingTextLineText
+            markCanvasStateDirty(updatePreview: true)
         }
         editingTextLineId = nil
         editingTextLineText = ""
@@ -742,12 +1175,45 @@ struct ContentView: View {
         guard !selectedTextLineIds.isEmpty else { return }
         pushUndoSnapshot()
         importedTextLines.removeAll { selectedTextLineIds.contains($0.id) }
-        sanitizeLayerGroups()
+        markCanvasStateDirty(updatePreview: true)
+        sanitizeArtLayers()
         if case .text(let id)? = selectedCanvasItem, !importedTextLines.contains(where: { $0.id == id }) {
             selectedCanvasItem = nil
         }
         selectedTextLineId = nil
         selectedTextLineIds = []
+    }
+
+    private func deleteSelectedCanvasSelection() {
+        guard !selectedCanvasLayerIds.isEmpty else { return }
+        pushUndoSnapshot()
+
+        let selectedStrokeIds = selectedCanvasLayerIds.compactMap { id -> UUID? in
+            guard id.hasPrefix("stroke-") else { return nil }
+            return UUID(uuidString: id.replacingOccurrences(of: "stroke-", with: ""))
+        }
+        let selectedTextDocIds = selectedCanvasLayerIds.compactMap { id -> UUID? in
+            guard id.hasPrefix("textdoc-") else { return nil }
+            return UUID(uuidString: id.replacingOccurrences(of: "textdoc-", with: ""))
+        }
+
+        if !selectedStrokeIds.isEmpty {
+            let set = Set(selectedStrokeIds)
+            strokes.removeAll { set.contains($0.id) }
+            hiddenStrokeIds.subtract(set)
+        }
+        if !selectedTextDocIds.isEmpty {
+            let selectedLineIds = Set(importedTextLines.filter { selectedTextDocIds.contains($0.documentId) }.map(\.id))
+            importedTextLines.removeAll { selectedTextDocIds.contains($0.documentId) }
+            hiddenTextLineIds.subtract(selectedLineIds)
+        }
+        markCanvasStateDirty(updatePreview: true)
+
+        selectedCanvasItem = nil
+        selectedCanvasLayerIds = []
+        selectedTextLineId = nil
+        selectedTextLineIds = []
+        sanitizeArtLayers()
     }
 
     private func startComposingNewText(at position: CGPoint) {
@@ -757,6 +1223,8 @@ struct ContentView: View {
         isComposingNewText = true
         selectedTextLineId = nil
         selectedTextLineIds = []
+        selectedCanvasItem = nil
+        selectedCanvasLayerIds = []
     }
 
     private func commitComposingText() {
@@ -764,8 +1232,9 @@ struct ContentView: View {
         let trimmed = composingText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             pushUndoSnapshot()
-            let line = ImportedTextLine(text: composingText, position: position, fontSize: 18, color: .black)
+            let line = ImportedTextLine(text: composingText, position: position, fontSize: 18, color: .black, layerId: activeLayerId)
             importedTextLines.append(line)
+            markCanvasStateDirty(updatePreview: true)
             selectedTextLineId = line.id
             selectedTextLineIds = [line.id]
         }
@@ -779,41 +1248,7 @@ struct ContentView: View {
         composingTextSelectionRange = NSRange(location: 0, length: 0)
     }
 
-    private func splitSelectedTextFromEditingLine() {
-        guard let id = editingTextLineId, let idx = importedTextLines.firstIndex(where: { $0.id == id }) else { return }
-        let nsText = editingTextLineText as NSString
-        let range = editingTextSelectionRange
-        guard range.length > 0, range.location >= 0, range.location + range.length <= nsText.length else { return }
-
-        pushUndoSnapshot()
-        let selected = nsText.substring(with: range)
-        let prefix = nsText.substring(to: range.location)
-        let suffix = nsText.substring(from: range.location + range.length)
-        let remaining = prefix + suffix
-
-        let original = importedTextLines[idx]
-        if remaining.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            importedTextLines.remove(at: idx)
-        } else {
-            importedTextLines[idx].text = remaining
-        }
-
-        let newLine = ImportedTextLine(
-            documentId: original.documentId,
-            groupId: original.groupId,
-            order: original.order + 1,
-            text: selected,
-            position: CGPoint(x: original.position.x + 14, y: original.position.y + original.fontSize * 1.5),
-            fontSize: original.fontSize,
-            color: original.color
-        )
-        importedTextLines.append(newLine)
-        selectedTextLineId = newLine.id
-        selectedTextLineIds = [newLine.id]
-        editingTextLineId = nil
-        editingTextLineText = ""
-        editingTextSelectionRange = NSRange(location: 0, length: 0)
-    }
+    
 
     private func splitWordFromDoubleTap(at contentPoint: CGPoint, in line: ImportedTextLine) {
         guard let idx = importedTextLines.firstIndex(where: { $0.id == line.id }) else { return }
@@ -832,6 +1267,7 @@ struct ContentView: View {
         if let s = parts.selected { insertion.append(s) }
         if let r = parts.right { insertion.append(r) }
         importedTextLines.insert(contentsOf: insertion, at: idx)
+        markCanvasStateDirty(updatePreview: true)
 
         let picked = parts.selected?.id ?? parts.left?.id ?? parts.right?.id
         selectedTextLineId = picked
@@ -866,30 +1302,19 @@ struct ContentView: View {
     }
 
     private func selectTextFragments(in rect: CGRect) {
-        var selectedIds: [UUID] = []
-        var changed = false
-        for idx in importedTextLines.indices.reversed() {
-            let line = importedTextLines[idx]
-            let bounds = boundsForTextLine(line)
-            guard bounds.intersects(rect) else { continue }
-            guard let range = characterRangeForRectOverlap(in: line, lineBounds: bounds, selectionRect: rect) else { continue }
-            let len = (line.text as NSString).length
-            if range.location == 0 && range.length == len {
-                selectedIds.append(line.id)
-                continue
-            }
-            changed = true
-            let parts = line.split(at: range)
-            importedTextLines.remove(at: idx)
-            var insertion: [ImportedTextLine] = []
-            if let l = parts.left { insertion.append(l) }
-            if let s = parts.selected { insertion.append(s); selectedIds.append(s.id) }
-            if let r = parts.right { insertion.append(r) }
-            importedTextLines.insert(contentsOf: insertion, at: idx)
+        let picked = importedTextLines.filter { line in
+            boundsForTextLine(line).intersects(rect)
         }
-        if changed { normalizeFragmentOrder() }
+        let selectedIds = picked.map(\.id)
         selectedTextLineIds = Set(selectedIds)
         selectedTextLineId = selectedIds.first
+
+        // Синхронізуємо canvas-вибір, щоб підсвітка/resize були однакові в обох режимах.
+        let selectedDocLayerIds: Set<String> = Set(
+            picked.map { line in CanvasLayer.text(line).id }
+        )
+        selectedCanvasLayerIds = selectedDocLayerIds
+        syncPrimarySelectionFromSet()
     }
 
     private func characterRangeForRectOverlap(in line: ImportedTextLine, lineBounds: CGRect, selectionRect: CGRect) -> NSRange? {
@@ -972,21 +1397,24 @@ struct ContentView: View {
     private func strokeAt(contentPoint: CGPoint) -> StrokeItem? {
         let threshold = max(10, drawingWidth) / scale
         let threshold2 = threshold * threshold
-        return strokes.reversed().first { stroke in
-            guard !hiddenStrokeIds.contains(stroke.id) else { return false }
-            return stroke.points.contains { p in
-                let dx = p.x - contentPoint.x
-                let dy = p.y - contentPoint.y
-                return dx * dx + dy * dy <= threshold2
+        for artLayer in artLayers.reversed() {
+            if hiddenArtLayerIds.contains(artLayer.id) { continue }
+            for stroke in strokes.reversed() where stroke.layerId == artLayer.id && !hiddenStrokeIds.contains(stroke.id) {
+                if stroke.points.contains(where: { p in
+                    let dx = p.x - contentPoint.x
+                    let dy = p.y - contentPoint.y
+                    return dx * dx + dy * dy <= threshold2
+                }) { return stroke }
             }
         }
+        return nil
     }
 
     private func selectedCanvasItemBounds() -> CGRect? {
         let layerIds = selectedCanvasLayerIds
         if !layerIds.isEmpty {
             let rects: [CGRect] = canvasLayers.compactMap { layer in
-                guard layerIds.contains(layer.id) else { return nil }
+                guard layerIds.contains(layer.id), isRenderableCanvasLayer(layer) else { return nil }
                 return boundsForCanvasLayer(layer)
             }
             guard let first = rects.first else { return nil }
@@ -1032,6 +1460,7 @@ struct ContentView: View {
         let dx = delta.width / scale
         let dy = delta.height / scale
         strokes[index].points = strokes[index].points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func moveText(id: UUID, delta: CGSize) {
@@ -1042,6 +1471,7 @@ struct ContentView: View {
             x: importedTextLines[index].position.x + dx,
             y: importedTextLines[index].position.y + dy
         )
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func resizeSelectedCanvasItem(delta: CGSize) {
@@ -1062,6 +1492,7 @@ struct ContentView: View {
         case nil:
             return
         }
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func boundsForCanvasLayer(_ layer: CanvasLayer) -> CGRect {
@@ -1075,6 +1506,7 @@ struct ContentView: View {
 
     private func selectCanvasItems(in rect: CGRect) {
         let picked = canvasLayers.filter { layer in
+            guard isRenderableCanvasLayer(layer) else { return false }
             let bounds = boundsForCanvasLayer(layer)
             return bounds.intersects(rect)
         }
@@ -1085,7 +1517,7 @@ struct ContentView: View {
     private func isPointInsideSelectedCanvasItems(_ point: CGPoint) -> Bool {
         guard !selectedCanvasLayerIds.isEmpty else { return false }
         return canvasLayers.contains { layer in
-            selectedCanvasLayerIds.contains(layer.id) && boundsForCanvasLayer(layer).contains(point)
+            selectedCanvasLayerIds.contains(layer.id) && isRenderableCanvasLayer(layer) && boundsForCanvasLayer(layer).contains(point)
         }
     }
 
@@ -1102,6 +1534,7 @@ struct ContentView: View {
             guard selectedCanvasLayerIds.contains(layerId) else { continue }
             importedTextLines[i].position = CGPoint(x: importedTextLines[i].position.x + dx, y: importedTextLines[i].position.y + dy)
         }
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func resizeSelectedCanvasItems(delta: CGSize) {
@@ -1128,6 +1561,7 @@ struct ContentView: View {
             importedTextLines[i].fontSize = (importedTextLines[i].fontSize * factor).clamped(to: 8...120)
         }
         syncPrimarySelectionFromSet()
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func applyWidthToSelectedLayers(_ width: CGFloat) {
@@ -1137,6 +1571,7 @@ struct ContentView: View {
             guard selectedCanvasLayerIds.contains(layerId) else { continue }
             strokes[i].width = width
         }
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func applyOpacityToSelectedLayers(_ opacity: Double) {
@@ -1146,6 +1581,7 @@ struct ContentView: View {
             guard selectedCanvasLayerIds.contains(layerId) else { continue }
             strokes[i].opacity = opacity
         }
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func applyColorToSelectedLayers(_ color: Color) {
@@ -1160,6 +1596,7 @@ struct ContentView: View {
             guard selectedCanvasLayerIds.contains(layerId) else { continue }
             importedTextLines[i].color = color
         }
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func applyStyleToSelectedLayers(_ style: DrawingStyle) {
@@ -1169,6 +1606,7 @@ struct ContentView: View {
             guard selectedCanvasLayerIds.contains(layerId) else { continue }
             strokes[i].style = style
         }
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func syncPrimarySelectionFromSet() {
@@ -1199,6 +1637,7 @@ struct ContentView: View {
         for i in importedTextLines.indices where selectedTextLineIds.contains(importedTextLines[i].id) {
             importedTextLines[i].documentId = newDocumentId
         }
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func strokeBounds(_ points: [CGPoint]) -> CGRect {
@@ -1219,20 +1658,35 @@ struct ContentView: View {
     private func eraseStrokes(at contentPoint: CGPoint) -> Bool {
         let radius = max(8, drawingWidth) / scale
         let r2 = radius * radius
-        let old = strokes.count
-        strokes.removeAll { stroke in
-            guard !hiddenStrokeIds.contains(stroke.id) else { return false }
-            return stroke.points.contains {
-                let dx = $0.x - contentPoint.x
-                let dy = $0.y - contentPoint.y
-                return dx * dx + dy * dy <= r2
+        var toRemove: UUID?
+        outer: for artLayer in artLayers.reversed() {
+            if hiddenArtLayerIds.contains(artLayer.id) { continue }
+            for stroke in strokes.reversed() where stroke.layerId == artLayer.id && !hiddenStrokeIds.contains(stroke.id) {
+                if stroke.points.contains(where: { p in
+                    let dx = p.x - contentPoint.x
+                    let dy = p.y - contentPoint.y
+                    return dx * dx + dy * dy <= r2
+                }) {
+                    toRemove = stroke.id
+                    break outer
+                }
             }
         }
+        guard let id = toRemove else { return false }
+        let old = strokes.count
+        strokes.removeAll { $0.id == id }
+        markCanvasStateDirty(updatePreview: true)
         return strokes.count != old
     }
 
     private func currentSnapshot() -> CanvasSnapshot {
-        CanvasSnapshot(strokes: strokes, importedTextLines: importedTextLines)
+        CanvasSnapshot(
+            strokes: strokes,
+            importedTextLines: importedTextLines,
+            artLayers: artLayers,
+            activeLayerId: activeLayerId,
+            hiddenArtLayerIds: hiddenArtLayerIds
+        )
     }
 
     private func pushUndoSnapshot() {
@@ -1255,9 +1709,12 @@ struct ContentView: View {
     private func apply(snapshot: CanvasSnapshot) {
         strokes = snapshot.strokes
         importedTextLines = snapshot.importedTextLines
+        artLayers = snapshot.artLayers
+        activeLayerId = snapshot.activeLayerId
+        hiddenArtLayerIds = snapshot.hiddenArtLayerIds
         hiddenStrokeIds = hiddenStrokeIds.intersection(Set(strokes.map(\.id)))
         hiddenTextLineIds = hiddenTextLineIds.intersection(Set(importedTextLines.map(\.id)))
-        sanitizeLayerGroups()
+        sanitizeArtLayers()
         currentStroke = []
         selectedTextLineId = nil
         selectedTextLineIds = []
@@ -1315,6 +1772,54 @@ struct ContentView: View {
         return (ns.substring(to: l) as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: fontSize)]).width
     }
 
+    private func performFingerTapAction(fingerCount: Int) {
+        let action: PencilTapShortcutAction
+        switch fingerCount {
+        case 2: action = fingerTap2Action
+        case 3: action = fingerTap3Action
+        case 4: action = fingerTap4Action
+        default: return
+        }
+        performShortcutAction(action)
+    }
+
+    private func performShortcutAction(_ action: PencilTapShortcutAction) {
+        switch action {
+        case .none:
+            return
+        case .undo:
+            undo()
+        case .redo:
+            redo()
+        case .selectTextTool:
+            activateTextTool()
+        case .selectCursorTool:
+            activateDrawingTool(.cursor)
+        case .selectPencilTool:
+            activateDrawingTool(.pencil)
+        case .selectPenTool:
+            activateDrawingTool(.pen)
+        case .selectMarkerTool:
+            activateDrawingTool(.marker)
+        case .selectEraserTool:
+            activateDrawingTool(.eraser)
+        }
+    }
+
+    private func activateTextTool() {
+        interactionMode = .text
+    }
+
+    private func activateDrawingTool(_ tool: DrawingToolKind) {
+        interactionMode = .draw
+        drawingTool = tool
+        if tool != .eraser, tool != .cursor { drawingWidth = tool.defaultWidth }
+        if tool != .cursor {
+            selectedCanvasItem = nil
+            selectedCanvasLayerIds = []
+        }
+    }
+
     private var canvasLayers: [CanvasLayer] {
         let strokeLayers = strokes.map(CanvasLayer.stroke)
         let textLayers = Dictionary(grouping: importedTextLines, by: \.documentId)
@@ -1325,147 +1830,43 @@ struct ContentView: View {
         return strokeLayers + textLayers
     }
 
-    private var layerGroupSections: [LayerGroupSection] {
-        let layerMap = Dictionary(uniqueKeysWithValues: canvasLayers.map { ($0.id, $0) })
-        var sections: [LayerGroupSection] = []
-        var groupedIds: Set<String> = []
-
-        for group in layerGroups {
-            let layers = group.memberLayerIds.compactMap { layerMap[$0] }
-            guard !layers.isEmpty else { continue }
-            groupedIds.formUnion(layers.map(\.id))
-            sections.append(
-                LayerGroupSection(
-                    id: "group-\(group.id.uuidString)",
-                    title: group.name,
-                    groupId: group.id,
-                    layers: layers,
-                    isExpanded: group.isExpanded
-                )
-            )
-        }
-
-        let ungrouped = canvasLayers.filter { !groupedIds.contains($0.id) }
-        if !ungrouped.isEmpty {
-            sections.append(
-                LayerGroupSection(
-                    id: "ungrouped",
-                    title: "Без групи",
-                    groupId: nil,
-                    layers: ungrouped,
-                    isExpanded: true
-                )
-            )
-        }
-        return sections
-    }
-
-    private func isLayerVisible(_ layer: CanvasLayer) -> Bool {
+    private func isRenderableCanvasLayer(_ layer: CanvasLayer) -> Bool {
         switch layer {
         case .stroke(let stroke):
-            return !hiddenStrokeIds.contains(stroke.id)
+            return !hiddenStrokeIds.contains(stroke.id) && !hiddenArtLayerIds.contains(stroke.layerId)
         case .text(let line):
-            return !importedTextLines.contains(where: { $0.documentId == line.documentId && hiddenTextLineIds.contains($0.id) })
+            guard !hiddenArtLayerIds.contains(line.layerId) else { return false }
+            let docIds = importedTextLines.filter { $0.documentId == line.documentId }.map(\.id)
+            return !docIds.allSatisfy { hiddenTextLineIds.contains($0) }
         }
     }
 
-    private func toggleLayerVisibility(_ layer: CanvasLayer) {
-        switch layer {
-        case .stroke(let stroke):
-            if hiddenStrokeIds.contains(stroke.id) {
-                hiddenStrokeIds.remove(stroke.id)
-            } else {
-                hiddenStrokeIds.insert(stroke.id)
-            }
-        case .text(let line):
-            let ids = importedTextLines.filter { $0.documentId == line.documentId }.map(\.id)
-            let allHidden = ids.allSatisfy { hiddenTextLineIds.contains($0) }
-            if allHidden {
-                hiddenTextLineIds.subtract(ids)
-            } else {
-                hiddenTextLineIds.formUnion(ids)
-                selectedTextLineIds.subtract(ids)
-                if let selectedTextLineId, ids.contains(selectedTextLineId) { self.selectedTextLineId = nil }
-                if let editingTextLineId, ids.contains(editingTextLineId) {
-                    self.editingTextLineId = nil
-                    editingTextLineText = ""
-                }
-            }
+    private func ensureArtLayersReady() {
+        if artLayers.isEmpty {
+            let id = UUID()
+            artLayers = [CanvasArtLayer(id: id, name: "Шар 1")]
+            activeLayerId = id
         }
-    }
-
-    private func toggleLayerSelectionForGrouping(_ layerId: String) {
-        if selectedLayerIdsForGrouping.contains(layerId) {
-            selectedLayerIdsForGrouping.remove(layerId)
-        } else {
-            selectedLayerIdsForGrouping.insert(layerId)
+        if !artLayers.contains(where: { $0.id == activeLayerId }) {
+            activeLayerId = artLayers[0].id
         }
+        let validLayerIds = Set(artLayers.map(\.id))
+        hiddenArtLayerIds = hiddenArtLayerIds.intersection(validLayerIds)
     }
 
-    private func createGroupFromSelection() {
-        guard selectedLayerIdsForGrouping.count >= 2 else { return }
-        let memberIds = Array(selectedLayerIdsForGrouping)
-        for index in layerGroups.indices {
-            layerGroups[index].memberLayerIds.removeAll { selectedLayerIdsForGrouping.contains($0) }
+    private func sanitizeArtLayers() {
+        ensureArtLayersReady()
+        let validLayerIds = Set(artLayers.map(\.id))
+        let fallback = artLayers[0].id
+        for i in strokes.indices where !validLayerIds.contains(strokes[i].layerId) {
+            strokes[i].layerId = fallback
         }
-        layerGroups.removeAll { $0.memberLayerIds.isEmpty }
-        layerGroups.append(LayerGroup(name: "Група \(layerGroups.count + 1)", memberLayerIds: memberIds))
-        selectedLayerIdsForGrouping.removeAll()
-    }
-
-    private func ungroup(_ groupId: UUID) {
-        layerGroups.removeAll { $0.id == groupId }
-    }
-
-    private func toggleGroupExpansion(_ groupId: UUID) {
-        guard let index = layerGroups.firstIndex(where: { $0.id == groupId }) else { return }
-        layerGroups[index].isExpanded.toggle()
-    }
-
-    private func isSectionVisible(_ section: LayerGroupSection) -> Bool {
-        section.layers.allSatisfy(isLayerVisible(_:))
-    }
-
-    private func toggleGroupVisibility(_ section: LayerGroupSection) {
-        let makeVisible = !isSectionVisible(section)
-        for layer in section.layers {
-            setLayerVisibility(layer, isVisible: makeVisible)
+        for i in importedTextLines.indices where !validLayerIds.contains(importedTextLines[i].layerId) {
+            importedTextLines[i].layerId = fallback
         }
-    }
-
-    private func setLayerVisibility(_ layer: CanvasLayer, isVisible: Bool) {
-        switch layer {
-        case .stroke(let stroke):
-            if isVisible {
-                hiddenStrokeIds.remove(stroke.id)
-            } else {
-                hiddenStrokeIds.insert(stroke.id)
-            }
-        case .text(let line):
-            if isVisible {
-                let ids = importedTextLines.filter { $0.documentId == line.documentId }.map(\.id)
-                hiddenTextLineIds.subtract(ids)
-            } else {
-                let ids = importedTextLines.filter { $0.documentId == line.documentId }.map(\.id)
-                hiddenTextLineIds.formUnion(ids)
-                selectedTextLineIds.subtract(ids)
-                if let selectedTextLineId, ids.contains(selectedTextLineId) { self.selectedTextLineId = nil }
-                if let editingTextLineId, ids.contains(editingTextLineId) {
-                    self.editingTextLineId = nil
-                    editingTextLineText = ""
-                }
-            }
-        }
-    }
-
-    private func sanitizeLayerGroups() {
+        hiddenStrokeIds = hiddenStrokeIds.intersection(Set(strokes.map(\.id)))
+        hiddenTextLineIds = hiddenTextLineIds.intersection(Set(importedTextLines.map(\.id)))
         let validIds = Set(canvasLayers.map(\.id))
-        for index in layerGroups.indices {
-            layerGroups[index].memberLayerIds.removeAll { !validIds.contains($0) }
-        }
-        layerGroups.removeAll { $0.memberLayerIds.isEmpty }
-        selectedLayerIdsForGrouping = selectedLayerIdsForGrouping.intersection(validIds)
-        customLayerNames = customLayerNames.filter { validIds.contains($0.key) }
         selectedCanvasLayerIds = selectedCanvasLayerIds.intersection(validIds)
         if let selected = selectedCanvasItem {
             switch selected {
@@ -1476,42 +1877,70 @@ struct ContentView: View {
             }
         }
         if selectedCanvasItem == nil { syncPrimarySelectionFromSet() }
+        markCanvasStateDirty(updatePreview: true)
     }
 
-    private func groupNameBinding(_ groupId: UUID) -> Binding<String> {
-        Binding(
-            get: {
-                layerGroups.first(where: { $0.id == groupId })?.name ?? "Група"
-            },
-            set: { newValue in
-                guard let index = layerGroups.firstIndex(where: { $0.id == groupId }) else { return }
-                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                layerGroups[index].name = trimmed.isEmpty ? "Група \(index + 1)" : newValue
-            }
-        )
+    private func addArtLayer() {
+        pushUndoSnapshot()
+        let n = artLayers.count + 1
+        let layer = CanvasArtLayer(id: UUID(), name: "Шар \(n)")
+        artLayers.append(layer)
+        activeLayerId = layer.id
+        markCanvasStateDirty(updatePreview: true)
     }
 
-    private func layerNameBinding(_ layer: CanvasLayer) -> Binding<String> {
-        Binding(
-            get: {
-                customLayerNames[layer.id] ?? layer.title
-            },
-            set: { newValue in
-                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty || trimmed == layer.title {
-                    customLayerNames.removeValue(forKey: layer.id)
-                } else {
-                    customLayerNames[layer.id] = newValue
-                }
-            }
-        )
+    private func deleteArtLayer(_ layer: CanvasArtLayer) {
+        guard let idx = artLayers.firstIndex(where: { $0.id == layer.id }) else { return }
+        pushUndoSnapshot()
+
+        let removedId = layer.id
+        strokes.removeAll { $0.layerId == removedId }
+        importedTextLines.removeAll { $0.layerId == removedId }
+
+        if artLayers.count == 1 {
+            // Для останнього шару видалення має реально очищати канву.
+            let replacement = CanvasArtLayer(id: UUID(), name: "Шар 1")
+            artLayers = [replacement]
+            activeLayerId = replacement.id
+        } else {
+            artLayers.remove(at: idx)
+            let fallbackIndex = min(idx, artLayers.count - 1)
+            let fallbackId = artLayers[fallbackIndex].id
+            if activeLayerId == removedId { activeLayerId = fallbackId }
+        }
+
+        hiddenArtLayerIds.remove(removedId)
+        sanitizeArtLayers()
+        markCanvasStateDirty(updatePreview: true)
+    }
+
+    private func moveArtLayerTowardFront(_ index: Int) {
+        guard index < artLayers.count - 1 else { return }
+        pushUndoSnapshot()
+        artLayers.swapAt(index, index + 1)
+        markCanvasStateDirty(updatePreview: true)
+    }
+
+    private func moveArtLayerTowardBack(_ index: Int) {
+        guard index > 0 else { return }
+        pushUndoSnapshot()
+        artLayers.swapAt(index, index - 1)
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private var canvasStateFileURL: URL {
         projectStore.canvasFileURL(for: projectId)
     }
 
-    private func saveCanvasState() {
+    private func markCanvasStateDirty(updatePreview: Bool) {
+        isCanvasStateDirty = true
+        if updatePreview {
+            isPreviewDirty = true
+        }
+    }
+
+    private func saveCanvasStateIfNeeded(force: Bool = false) {
+        guard force || isCanvasStateDirty else { return }
         let state = CanvasStateDTO(
             scale: Double(scale),
             offsetX: Double(offset.width),
@@ -1520,38 +1949,129 @@ struct ContentView: View {
             hiddenStrokeIds: Array(hiddenStrokeIds),
             importedTextLines: importedTextLines.map(ImportedTextLineDTO.init),
             hiddenTextLineIds: Array(hiddenTextLineIds),
-            layerGroups: layerGroups.map(LayerGroupDTO.init),
-            customLayerNames: customLayerNames,
-            toolDockPlacement: toolDockPlacement.rawValue
+            layerGroups: [],
+            customLayerNames: [:],
+            toolDockPlacement: nil,
+            canvasBackground: canvasBackground.rawValue,
+            artLayers: artLayers.map(CanvasArtLayerDTO.init),
+            activeLayerId: activeLayerId,
+            hiddenArtLayerIds: Array(hiddenArtLayerIds)
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(state) else { return }
         try? data.write(to: canvasStateFileURL, options: .atomic)
-        if let png = CanvasPreviewRenderer.pngData(from: state) {
+        isCanvasStateDirty = false
+
+        if shouldRenderPreview(for: state, force: force),
+           let png = CanvasPreviewRenderer.pngData(from: state) {
             projectStore.writePreviewPNG(id: projectId, data: png)
+            lastPreviewRenderAt = Date()
+            isPreviewDirty = false
         }
         projectStore.touchModified(id: projectId)
     }
 
+    private func shouldRenderPreview(for state: CanvasStateDTO, force: Bool) -> Bool {
+        if force { return true }
+        guard isPreviewDirty else { return false }
+        if state.importedTextLines.count > previewLiveRenderTextLineLimit {
+            return false
+        }
+        let elapsed = Date().timeIntervalSince(lastPreviewRenderAt)
+        return elapsed >= previewRenderThrottleSeconds
+    }
+
     private func loadCanvasStateIfNeeded() {
         guard let data = try? Data(contentsOf: canvasStateFileURL),
-              let state = try? JSONDecoder().decode(CanvasStateDTO.self, from: data) else { return }
+              let state = try? JSONDecoder().decode(CanvasStateDTO.self, from: data) else {
+            return
+        }
 
         scale = CGFloat(state.scale).clamped(to: minScale...maxScale)
         offset = CGSize(width: CGFloat(state.offsetX), height: CGFloat(state.offsetY))
-        strokes = state.strokes.map(\.strokeItem)
-        hiddenStrokeIds = Set(state.hiddenStrokeIds)
-        importedTextLines = state.importedTextLines.map(\.importedTextLine)
-        hiddenTextLineIds = Set(state.hiddenTextLineIds)
-        layerGroups = state.layerGroups.map(\.layerGroup)
-        customLayerNames = state.customLayerNames
-        if let raw = state.toolDockPlacement, let p = ToolDockPlacement(rawValue: raw) {
-            toolDockPlacement = p
+
+        var loadedArt = (state.artLayers ?? []).map(\.artLayer)
+        let fallback: UUID
+        if loadedArt.isEmpty {
+            fallback = UUID()
+            loadedArt = [CanvasArtLayer(id: fallback, name: "Шар 1")]
         } else {
-            toolDockPlacement = .bottom
+            fallback = loadedArt[0].id
         }
-        sanitizeLayerGroups()
+        artLayers = loadedArt
+        strokes = state.strokes.map { $0.strokeItem(fallbackLayerId: fallback) }
+        hiddenStrokeIds = Set(state.hiddenStrokeIds)
+        importedTextLines = state.importedTextLines.map { $0.importedTextLine(fallbackLayerId: fallback) }
+        hiddenTextLineIds = Set(state.hiddenTextLineIds)
+        if let aid = state.activeLayerId, loadedArt.contains(where: { $0.id == aid }) {
+            activeLayerId = aid
+        } else {
+            activeLayerId = loadedArt[0].id
+        }
+        canvasBackground = CanvasBackgroundKind.decode(from: state.canvasBackground)
+        hiddenArtLayerIds = Set(state.hiddenArtLayerIds ?? []).intersection(Set(loadedArt.map(\.id)))
+        sanitizeArtLayers()
+        isCanvasStateDirty = false
+        isPreviewDirty = false
+    }
+}
+
+private struct PencilTapActionRow: View {
+    let title: String
+    @Binding var selection: PencilTapShortcutAction
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(PencilTapShortcutAction.allCases) { action in
+                        shortcutOptionButton(action)
+                    }
+                }
+            }
+            .padding(.horizontal, 2)
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func shortcutOptionButton(_ action: PencilTapShortcutAction) -> some View {
+        let isSelected = selection == action
+        return Button {
+            selection = action
+        } label: {
+            VStack(spacing: 7) {
+                Image(systemName: action.symbolName)
+                    .font(.system(size: 20, weight: .semibold))
+                    .frame(width: 68, height: 68)
+                    .foregroundStyle(isSelected ? Color.primary : Color.primary.opacity(0.8))
+                    .background(
+                        Circle()
+                            .fill(isSelected ? Color(UIColor.systemBackground) : Color(UIColor.tertiarySystemBackground))
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(isSelected ? Color.primary : Color(UIColor.separator).opacity(0.5), lineWidth: isSelected ? 2.2 : 1)
+                    )
+
+                Text(action.shortTitle)
+                    .font(.caption.weight(isSelected ? .semibold : .regular))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .frame(width: 86)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(action.title)
     }
 }
 

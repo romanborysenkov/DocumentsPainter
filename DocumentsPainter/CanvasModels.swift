@@ -62,14 +62,89 @@ enum InteractionMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Розташування панелі інструментів (фіксована, не перетягується).
-enum ToolDockPlacement: String, CaseIterable, Identifiable, Codable {
-    /// Вузька колонка зліва.
-    case leading
-    /// Смуга знизу.
-    case bottom
+enum PencilTapShortcutAction: String, CaseIterable, Identifiable {
+    case none
+    case undo
+    case redo
+    case selectTextTool
+    case selectCursorTool
+    case selectPencilTool
+    case selectPenTool
+    case selectMarkerTool
+    case selectEraserTool
 
     var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .none: return "Нічого"
+        case .undo: return "Undo"
+        case .redo: return "Redo"
+        case .selectTextTool: return "Інструмент: Текст"
+        case .selectCursorTool: return "Інструмент: Курсор"
+        case .selectPencilTool: return "Інструмент: Олівець"
+        case .selectPenTool: return "Інструмент: Ручка"
+        case .selectMarkerTool: return "Інструмент: Маркер"
+        case .selectEraserTool: return "Інструмент: Гумка"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .none: return "Нічого"
+        case .undo: return "Undo"
+        case .redo: return "Redo"
+        case .selectTextTool: return "Текст"
+        case .selectCursorTool: return "Курсор"
+        case .selectPencilTool: return "Олівець"
+        case .selectPenTool: return "Ручка"
+        case .selectMarkerTool: return "Маркер"
+        case .selectEraserTool: return "Гумка"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .none: return "xmark"
+        case .undo: return "arrow.uturn.backward"
+        case .redo: return "arrow.uturn.forward"
+        case .selectTextTool: return "textformat"
+        case .selectCursorTool: return "cursorarrow"
+        case .selectPencilTool: return "pencil"
+        case .selectPenTool: return "pencil.tip"
+        case .selectMarkerTool: return "highlighter"
+        case .selectEraserTool: return "eraser"
+        }
+    }
+}
+
+enum CanvasBackgroundKind: String, CaseIterable, Identifiable, Codable {
+    case blank
+    case dots
+    case lines
+    case grid
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .blank: return "Пустий"
+        case .dots: return "В крапочку"
+        case .lines: return "В лінійку"
+        case .grid: return "В сіточку"
+        }
+    }
+
+    static func decode(from raw: String?) -> CanvasBackgroundKind {
+        guard let raw else { return .dots }
+        if let value = CanvasBackgroundKind(rawValue: raw) { return value }
+        switch raw {
+        case "white", "warm", "gray", "night":
+            return .blank
+        default:
+            return .dots
+        }
+    }
 }
 
 /// Ім’я координатного простору для канви (жести, hit-testing).
@@ -79,6 +154,8 @@ enum EditorCanvasCoordinateSpace {
 
 struct StrokeItem: Identifiable {
     var id: UUID = UUID()
+    /// Логічний шар (порядок шарів — у масиві `artLayers`).
+    var layerId: UUID
     var points: [CGPoint]
     var color: Color
     var width: CGFloat
@@ -91,6 +168,7 @@ struct ImportedTextLine: Identifiable {
     var documentId: UUID = UUID()
     var groupId: UUID = UUID()
     var order: Int = 0
+    var layerId: UUID
     var text: String
     var position: CGPoint
     var fontSize: CGFloat
@@ -98,6 +176,20 @@ struct ImportedTextLine: Identifiable {
 }
 
 extension ImportedTextLine {
+    init(text: String, position: CGPoint, fontSize: CGFloat, color: Color, layerId: UUID) {
+        self.init(
+            id: UUID(),
+            documentId: UUID(),
+            groupId: UUID(),
+            order: 0,
+            layerId: layerId,
+            text: text,
+            position: position,
+            fontSize: fontSize,
+            color: color
+        )
+    }
+
     func split(at range: NSRange) -> (left: ImportedTextLine?, selected: ImportedTextLine?, right: ImportedTextLine?) {
         let nsText = text as NSString
         let length = nsText.length
@@ -114,15 +206,17 @@ extension ImportedTextLine {
         let spacing = max(8, fontSize * 0.6)
 
         let left = leftText.isEmpty ? nil : ImportedTextLine(
-            id: UUID(), documentId: documentId, groupId: groupId, order: order, text: leftText,
-            position: position, fontSize: fontSize, color: color
+            id: UUID(), documentId: documentId, groupId: groupId, order: order, layerId: layerId,
+            text: leftText, position: position, fontSize: fontSize, color: color
         )
         let selected = selectedText.isEmpty ? nil : ImportedTextLine(
-            id: UUID(), documentId: documentId, groupId: groupId, order: order + 1, text: selectedText,
+            id: UUID(), documentId: documentId, groupId: groupId, order: order + 1, layerId: layerId,
+            text: selectedText,
             position: CGPoint(x: position.x + leftWidth + spacing, y: position.y), fontSize: fontSize, color: color
         )
         let right = rightText.isEmpty ? nil : ImportedTextLine(
-            id: UUID(), documentId: documentId, groupId: groupId, order: order + 2, text: rightText,
+            id: UUID(), documentId: documentId, groupId: groupId, order: order + 2, layerId: layerId,
+            text: rightText,
             position: CGPoint(x: position.x + leftWidth + selectedWidth + spacing * 2, y: position.y), fontSize: fontSize, color: color
         )
         return (left, selected, right)
@@ -132,6 +226,28 @@ extension ImportedTextLine {
 struct CanvasSnapshot {
     var strokes: [StrokeItem]
     var importedTextLines: [ImportedTextLine]
+    var artLayers: [CanvasArtLayer]
+    var activeLayerId: UUID
+    var hiddenArtLayerIds: Set<UUID>
+}
+
+struct CanvasArtLayer: Identifiable, Codable, Hashable, Equatable {
+    var id: UUID
+    var name: String
+}
+
+struct CanvasArtLayerDTO: Codable {
+    var id: UUID
+    var name: String
+
+    init(_ layer: CanvasArtLayer) {
+        id = layer.id
+        name = layer.name
+    }
+
+    var artLayer: CanvasArtLayer {
+        CanvasArtLayer(id: id, name: name)
+    }
 }
 
 struct CanvasStateDTO: Codable {
@@ -144,12 +260,19 @@ struct CanvasStateDTO: Codable {
     var hiddenTextLineIds: [UUID]
     var layerGroups: [LayerGroupDTO]
     var customLayerNames: [String: String]
-    /// `"leading"` | `"bottom"`. Якщо `nil` (старі збереження) — трактуємо як `bottom`.
+    /// Застаріле поле з старих збережень; ігнорується.
     var toolDockPlacement: String?
+    /// Фон канви. Якщо `nil` (старі збереження) — використовуємо білий.
+    var canvasBackground: String?
+    /// Нові поля; `nil` у старих файлах — міграція в `loadCanvasStateIfNeeded`.
+    var artLayers: [CanvasArtLayerDTO]?
+    var activeLayerId: UUID?
+    var hiddenArtLayerIds: [UUID]?
 }
 
 struct StrokeItemDTO: Codable {
     var id: UUID
+    var layerId: UUID?
     var points: [CGPointDTO]
     var color: RGBAColorDTO
     var width: Double
@@ -162,6 +285,7 @@ struct ImportedTextLineDTO: Codable {
     var documentId: UUID
     var groupId: UUID
     var order: Int
+    var layerId: UUID?
     var text: String
     var position: CGPointDTO
     var fontSize: Double
@@ -225,6 +349,7 @@ extension RGBAColorDTO {
 extension StrokeItemDTO {
     init(_ stroke: StrokeItem) {
         id = stroke.id
+        layerId = stroke.layerId
         points = stroke.points.map(CGPointDTO.init)
         color = RGBAColorDTO(stroke.color)
         width = stroke.width
@@ -232,9 +357,10 @@ extension StrokeItemDTO {
         opacity = stroke.opacity
     }
 
-    var strokeItem: StrokeItem {
+    func strokeItem(fallbackLayerId: UUID) -> StrokeItem {
         StrokeItem(
             id: id,
+            layerId: layerId ?? fallbackLayerId,
             points: points.map(\.cgPoint),
             color: color.swiftUIColor,
             width: width,
@@ -250,18 +376,20 @@ extension ImportedTextLineDTO {
         documentId = line.documentId
         groupId = line.groupId
         order = line.order
+        layerId = line.layerId
         text = line.text
         position = CGPointDTO(line.position)
         fontSize = line.fontSize
         color = RGBAColorDTO(line.color)
     }
 
-    var importedTextLine: ImportedTextLine {
+    func importedTextLine(fallbackLayerId: UUID) -> ImportedTextLine {
         ImportedTextLine(
             id: id,
             documentId: documentId,
             groupId: groupId,
             order: order,
+            layerId: layerId ?? fallbackLayerId,
             text: text,
             position: position.cgPoint,
             fontSize: fontSize,
