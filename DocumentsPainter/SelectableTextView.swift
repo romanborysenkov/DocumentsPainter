@@ -4,8 +4,9 @@ import UIKit
 struct SelectableTextView: UIViewRepresentable {
     @Binding var text: String
     @Binding var selectedRange: NSRange
+    var textColor: UIColor = .black
 
-    class Coordinator: NSObject, UITextViewDelegate {
+    class Coordinator: NSObject, UITextViewDelegate, UIScribbleInteractionDelegate {
         var parent: SelectableTextView
 
         init(_ parent: SelectableTextView) {
@@ -19,6 +20,11 @@ struct SelectableTextView: UIViewRepresentable {
         func textViewDidChangeSelection(_ textView: UITextView) {
             parent.selectedRange = textView.selectedRange
         }
+
+        @available(iOS 14.0, *)
+        func scribbleInteraction(_ interaction: UIScribbleInteraction, shouldBeginAt location: CGPoint) -> Bool {
+            false
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -31,8 +37,13 @@ struct SelectableTextView: UIViewRepresentable {
         tv.isScrollEnabled = true
         tv.backgroundColor = .clear
         tv.font = UIFont.systemFont(ofSize: 17)
+        tv.textColor = textColor
+        tv.typingAttributes[.foregroundColor] = textColor
         tv.isSelectable = true
         tv.delegate = context.coordinator
+        if #available(iOS 14.0, *) {
+            tv.addInteraction(UIScribbleInteraction(delegate: context.coordinator))
+        }
         DispatchQueue.main.async {
             if tv.window != nil {
                 tv.becomeFirstResponder()
@@ -45,6 +56,10 @@ struct SelectableTextView: UIViewRepresentable {
         if uiView.text != text {
             uiView.text = text
         }
+        if uiView.textColor != textColor {
+            uiView.textColor = textColor
+        }
+        uiView.typingAttributes[.foregroundColor] = textColor
 
         let length = (text as NSString).length
         let range = selectedRange

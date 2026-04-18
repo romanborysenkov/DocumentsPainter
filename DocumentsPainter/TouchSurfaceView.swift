@@ -30,7 +30,8 @@ struct TouchSurfaceView: UIViewRepresentable {
     var onPencilBegan: (CGPoint) -> Void
     var onSingleTap: (CGPoint) -> Void
     var onDoubleTap: (CGPoint) -> Void
-    var onPencilDoubleTap: (CGPoint) -> Void
+    var onPencilDoubleTap: () -> Void
+    var onMultiFingerTap: (_ fingerCount: Int, _ point: CGPoint) -> Void
     var onPencilMoved: (CGPoint) -> Void
     var onPencilEnded: () -> Void
     var onFingerPanBegan: (CGPoint) -> Void
@@ -71,13 +72,23 @@ struct TouchSurfaceView: UIViewRepresentable {
         doubleTap.delegate = context.coordinator
         singleTap.require(toFail: doubleTap)
 
-        let pencilDoubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePencilDoubleTap(_:)))
-        pencilDoubleTap.numberOfTapsRequired = 2
-        pencilDoubleTap.numberOfTouchesRequired = 1
-        pencilDoubleTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
-        pencilDoubleTap.delegate = context.coordinator
-        pencilDoubleTap.cancelsTouchesInView = false
-        pencilDoubleTap.delaysTouchesEnded = false
+        let twoFingerTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTwoFingerTap(_:)))
+        twoFingerTap.numberOfTapsRequired = 1
+        twoFingerTap.numberOfTouchesRequired = 2
+        twoFingerTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        twoFingerTap.delegate = context.coordinator
+
+        let threeFingerTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleThreeFingerTap(_:)))
+        threeFingerTap.numberOfTapsRequired = 1
+        threeFingerTap.numberOfTouchesRequired = 3
+        threeFingerTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        threeFingerTap.delegate = context.coordinator
+
+        let fourFingerTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleFourFingerTap(_:)))
+        fourFingerTap.numberOfTapsRequired = 1
+        fourFingerTap.numberOfTouchesRequired = 4
+        fourFingerTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        fourFingerTap.delegate = context.coordinator
 
         let navPan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTwoFingerPan(_:)))
         navPan.minimumNumberOfTouches = 2
@@ -93,9 +104,14 @@ struct TouchSurfaceView: UIViewRepresentable {
         view.addGestureRecognizer(fingerPan)
         view.addGestureRecognizer(singleTap)
         view.addGestureRecognizer(doubleTap)
-        view.addGestureRecognizer(pencilDoubleTap)
+        view.addGestureRecognizer(twoFingerTap)
+        view.addGestureRecognizer(threeFingerTap)
+        view.addGestureRecognizer(fourFingerTap)
         view.addGestureRecognizer(navPan)
         view.addGestureRecognizer(pinch)
+        let pencilInteraction = UIPencilInteraction()
+        pencilInteraction.delegate = context.coordinator
+        view.addInteraction(pencilInteraction)
 
         return view
     }
@@ -154,9 +170,19 @@ struct TouchSurfaceView: UIViewRepresentable {
             parent.onDoubleTap(g.location(in: g.view))
         }
 
-        @objc func handlePencilDoubleTap(_ g: UITapGestureRecognizer) {
+        @objc func handleTwoFingerTap(_ g: UITapGestureRecognizer) {
             guard g.state == .ended else { return }
-            parent.onPencilDoubleTap(g.location(in: g.view))
+            parent.onMultiFingerTap(2, g.location(in: g.view))
+        }
+
+        @objc func handleThreeFingerTap(_ g: UITapGestureRecognizer) {
+            guard g.state == .ended else { return }
+            parent.onMultiFingerTap(3, g.location(in: g.view))
+        }
+
+        @objc func handleFourFingerTap(_ g: UITapGestureRecognizer) {
+            guard g.state == .ended else { return }
+            parent.onMultiFingerTap(4, g.location(in: g.view))
         }
 
         @objc func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
@@ -175,5 +201,11 @@ struct TouchSurfaceView: UIViewRepresentable {
             let combo = (g is UIPinchGestureRecognizer && other is UIPanGestureRecognizer) || (g is UIPanGestureRecognizer && other is UIPinchGestureRecognizer)
             return combo
         }
+    }
+}
+
+extension TouchSurfaceView.Coordinator: UIPencilInteractionDelegate {
+    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+        parent.onPencilDoubleTap()
     }
 }

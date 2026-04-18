@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ImportButtonView: View {
     @Binding var showImportPicker: Bool
@@ -16,6 +17,110 @@ struct ImportButtonView: View {
     }
 }
 
+struct ExportMenuButtonView: View {
+    let exportKinds: [CanvasExportKind]
+    let onSelect: (CanvasExportKind) -> Void
+    @State private var showExportOptions = false
+
+    var body: some View {
+        Button {
+            showExportOptions = true
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+                .font(.system(size: 18, weight: .semibold))
+                .frame(width: 40, height: 40)
+                .background(Color(UIColor.systemBackground), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(UIColor.separator).opacity(0.3), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Експорт")
+        .popover(isPresented: $showExportOptions) {
+            exportPopoverContent
+                .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    private var exportPopoverContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Експорт")
+                .font(.subheadline.weight(.semibold))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(exportKinds) { kind in
+                        exportOptionButton(kind)
+                    }
+                }
+                .padding(.horizontal, 2)
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 360)
+    }
+
+    private func exportOptionButton(_ kind: CanvasExportKind) -> some View {
+        Button {
+            showExportOptions = false
+            onSelect(kind)
+        } label: {
+            VStack(spacing: 7) {
+                Image(systemName: symbolName(for: kind))
+                    .font(.system(size: 20, weight: .semibold))
+                    .frame(width: 68, height: 68)
+                    .foregroundStyle(.primary)
+                    .background(
+                        Circle()
+                            .fill(Color(UIColor.tertiarySystemBackground))
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(Color(UIColor.separator).opacity(0.55), lineWidth: 1)
+                    )
+
+                Text(shortTitle(for: kind))
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .frame(width: 86)
+            .padding(.vertical, 6)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(kind.title)
+    }
+
+    private func symbolName(for kind: CanvasExportKind) -> String {
+        switch kind {
+        case .jpg:
+            return "photo"
+        case .png:
+            return "photo.fill"
+        case .svg:
+            return "scribble.variable"
+        case .pdfFlattened:
+            return "doc.richtext"
+        case .pdfVector:
+            return "doc.text.image"
+        }
+    }
+
+    private func shortTitle(for kind: CanvasExportKind) -> String {
+        switch kind {
+        case .jpg:
+            return "JPG"
+        case .png:
+            return "PNG"
+        case .svg:
+            return "SVG"
+        case .pdfFlattened:
+            return "PDF flat"
+        case .pdfVector:
+            return "PDF vec"
+        }
+    }
+}
+
 struct SearchPanelView: View {
     @Binding var searchQuery: String
 
@@ -25,6 +130,8 @@ struct SearchPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Пошук", text: $searchQuery)
+                    .foregroundStyle(.black)
+                    .tint(.black)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                 if !searchQuery.isEmpty {
@@ -37,7 +144,11 @@ struct SearchPanelView: View {
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color(UIColor.separator).opacity(0.3), lineWidth: 1))
         }
         .padding(12)
-        //.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+        )
     }
 }
 
@@ -113,102 +224,23 @@ struct LayerThumbnailView: View {
     }
 }
 
-struct LayersPanelView: View {
-    /// `nil` — висота списку шарів займає доступний простір у батьківському `VStack`.
+struct ArtLayersPanelView: View {
     var listMaxHeight: CGFloat? = 280
-    /// У боковій колонці тягнемось на ширину колонки замість фіксованих 280 pt.
     var useSidebarColumnWidth: Bool = false
+    /// Плаває над канвою без зовнішньої «картки»; рядки з легким склом.
+    var floatOnCanvas: Bool = false
+    var panelWidth: CGFloat?
 
-    let canvasLayers: [CanvasLayer]
-    let layerGroupSections: [LayerGroupSection]
-    let selectedLayerIdsForGrouping: Set<String>
-    let createGroupFromSelection: () -> Void
-    let ungroup: (UUID) -> Void
-    let toggleGroupExpansion: (UUID) -> Void
-    let toggleGroupVisibility: (LayerGroupSection) -> Void
-    let isSectionVisible: (LayerGroupSection) -> Bool
-    let toggleLayerSelectionForGrouping: (String) -> Void
-    let layerNameBinding: (CanvasLayer) -> Binding<String>
-    let groupNameBinding: (UUID) -> Binding<String>
-    let toggleLayerVisibility: (CanvasLayer) -> Void
-    let isLayerVisible: (CanvasLayer) -> Bool
+    let artLayers: [CanvasArtLayer]
+    @Binding var activeLayerId: UUID
+    @Binding var hiddenArtLayerIds: Set<UUID>
+    let onAddLayer: () -> Void
+    let onDeleteLayer: (CanvasArtLayer) -> Void
+    let onMoveLayerTowardFront: (Int) -> Void
+    let onMoveLayerTowardBack: (Int) -> Void
+    let onRenameLayer: (CanvasArtLayer) -> Void
 
-    private var layerSectionsScroll: some View {
-        ScrollView {
-            VStack(spacing: 6) {
-                ForEach(layerGroupSections) { section in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Image(systemName: section.groupId == nil ? "square.stack.3d.down.right" : "folder")
-                                .foregroundStyle(.secondary)
-                            if let groupId = section.groupId {
-                                TextField("Назва групи", text: groupNameBinding(groupId))
-                                    .font(.caption.bold())
-                            } else {
-                                Text(section.title)
-                                    .font(.caption.bold())
-                            }
-                            Spacer()
-                            if let groupId = section.groupId {
-                                Button { ungroup(groupId) } label: {
-                                    Image(systemName: "link.badge.minus")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Розгрупувати")
-                            }
-                            Button {
-                                if let groupId = section.groupId { toggleGroupExpansion(groupId) }
-                            } label: {
-                                Image(systemName: section.groupId == nil || section.isExpanded ? "chevron.down" : "chevron.right")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(section.groupId == nil)
-                            Button { toggleGroupVisibility(section) } label: {
-                                Image(systemName: isSectionVisible(section) ? "eye" : "eye.slash")
-                                    .foregroundStyle(isSectionVisible(section) ? Color.primary : Color.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(isSectionVisible(section) ? "Приховати групу" : "Показати групу")
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Color(UIColor.systemBackground), in: RoundedRectangle(cornerRadius: 8))
-
-                        if section.groupId == nil || section.isExpanded {
-                            ForEach(section.layers.reversed()) { layer in
-                                HStack(spacing: 8) {
-                                    Button { toggleLayerSelectionForGrouping(layer.id) } label: {
-                                        Image(systemName: selectedLayerIdsForGrouping.contains(layer.id) ? "checkmark.circle.fill" : "circle")
-                                            .foregroundStyle(selectedLayerIdsForGrouping.contains(layer.id) ? Color.accentColor : Color.secondary)
-                                    }
-                                    .buttonStyle(.plain)
-                                    LayerThumbnailView(layer: layer)
-                                    TextField("Назва шару", text: layerNameBinding(layer))
-                                        .font(.caption)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    Button { toggleLayerVisibility(layer) } label: {
-                                        Image(systemName: isLayerVisible(layer) ? "eye" : "eye.slash")
-                                            .foregroundStyle(isLayerVisible(layer) ? Color.primary : Color.secondary)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel(isLayerVisible(layer) ? "Приховати шар" : "Показати шар")
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                                .background(
-                                    (selectedLayerIdsForGrouping.contains(layer.id) ? Color.accentColor.opacity(0.14) : Color(UIColor.systemBackground)),
-                                    in: RoundedRectangle(cornerRadius: 8)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    private func isVisible(_ id: UUID) -> Bool { !hiddenArtLayerIds.contains(id) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -216,29 +248,138 @@ struct LayersPanelView: View {
                 Text("Слої")
                     .font(.headline)
                 Spacer()
-                Button("Згрупувати") { createGroupFromSelection() }
-                    .font(.caption)
-                    .disabled(selectedLayerIdsForGrouping.count < 2)
+                Button { onAddLayer() } label: {
+                    Label("Новий шар", systemImage: "plus.circle.fill")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .accessibilityLabel("Новий шар")
             }
-            if canvasLayers.isEmpty {
-                Text("Поки що немає шарів")
+            if artLayers.isEmpty {
+                Text("Немає шарів")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                layerSectionsScroll
-                    .frame(maxHeight: listMaxHeight ?? .infinity)
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(Array(artLayers.enumerated().reversed()), id: \.element.id) { pair in
+                            let index = pair.offset
+                            let layer = pair.element
+                            let towardFrontDisabled = index >= artLayers.count - 1
+                            let towardBackDisabled = index <= 0
+                            HStack(spacing: 8) {
+                                Text(layer.name)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Button {
+                                    onRenameLayer(layer)
+                                } label: {
+                                    Image(systemName: "pencil.line")
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Перейменувати шар")
+                                VStack(spacing: 2) {
+                                    Button { onMoveLayerTowardFront(index) } label: {
+                                        Image(systemName: "chevron.up")
+                                            .font(.system(size: 10, weight: .semibold))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(towardFrontDisabled)
+                                    Button { onMoveLayerTowardBack(index) } label: {
+                                        Image(systemName: "chevron.down")
+                                            .font(.system(size: 10, weight: .semibold))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(towardBackDisabled)
+                                }
+                                .foregroundStyle(.secondary)
+                                Button {
+                                    if hiddenArtLayerIds.contains(layer.id) {
+                                        hiddenArtLayerIds.remove(layer.id)
+                                    } else {
+                                        hiddenArtLayerIds.insert(layer.id)
+                                    }
+                                } label: {
+                                    Image(systemName: isVisible(layer.id) ? "eye" : "eye.slash")
+                                        .foregroundStyle(isVisible(layer.id) ? Color.primary : Color.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(isVisible(layer.id) ? "Приховати шар" : "Показати шар")
+                                Button { onDeleteLayer(layer) } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundStyle(.red.opacity(0.85))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Видалити шар")
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background { rowBackground(for: layer.id) }
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(activeLayerId == layer.id ? Color.accentColor.opacity(0.45) : Color.primary.opacity(floatOnCanvas ? 0.08 : 0), lineWidth: 1)
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture { activeLayerId = layer.id }
+                        }
+                    }
+                }
+                .frame(height: visibleLayerListHeight)
             }
         }
-        .frame(maxWidth: useSidebarColumnWidth ? .infinity : nil)
-        .frame(width: useSidebarColumnWidth ? nil : 280, alignment: .topLeading)
-        .padding(useSidebarColumnWidth ? 8 : 12)
+        .frame(width: panelFrameWidth, alignment: .topLeading)
+        .frame(maxWidth: panelMaxWidth, alignment: .topLeading)
+        .padding(panelPadding)
+    }
+
+    private var panelFrameWidth: CGFloat? {
+        if floatOnCanvas { return panelWidth ?? 280 }
+        if useSidebarColumnWidth { return nil }
+        return 280
+    }
+
+    private var panelMaxWidth: CGFloat? {
+        if floatOnCanvas { return nil }
+        if useSidebarColumnWidth { return .infinity }
+        return nil
+    }
+
+    private var panelPadding: CGFloat {
+        if floatOnCanvas { return 0 }
+        return useSidebarColumnWidth ? 8 : 12
+    }
+
+    private var visibleLayerListHeight: CGFloat {
+        let rowHeight: CGFloat = 34
+        let rowSpacing: CGFloat = 6
+        let count = CGFloat(artLayers.count)
+        guard count > 0 else { return 0 }
+
+        let contentHeight = (rowHeight * count) + (rowSpacing * max(0, count - 1))
+        if let listMaxHeight {
+            return min(contentHeight, listMaxHeight)
+        }
+        return contentHeight
+    }
+
+    @ViewBuilder
+    private func rowBackground(for layerId: UUID) -> some View {
+        let r = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        if floatOnCanvas {
+            r.fill(activeLayerId == layerId ? Color.accentColor.opacity(0.22) : Color(UIColor.secondarySystemFill))
+        } else {
+            r.fill(activeLayerId == layerId ? Color.accentColor.opacity(0.16) : Color(UIColor.systemBackground))
+        }
     }
 }
 
 struct ToolDockContentView: View {
-    /// Розмір виділеної зони панелі (фіксована смуга зліва або знизу).
-    let dockFrameSize: CGSize
-    let placement: ToolDockPlacement
+    /// Ширина для палітри (обмежує горизонтальний скрол).
+    let paletteMaxWidth: CGFloat
     let undoStackIsEmpty: Bool
     let redoStackIsEmpty: Bool
     let interactionMode: InteractionMode
@@ -259,312 +400,133 @@ struct ToolDockContentView: View {
     let onCustomColorSelected: (Color) -> Void
     let onDrawingStyleChanged: (DrawingStyle) -> Void
 
+    @State private var showStrokeSettings = false
+
+    private let dialDiameter: CGFloat = 196
+
+    private let paletteChipCorner: CGFloat = 5
+    private let paletteChipW: CGFloat = 32
+    private let paletteChipH: CGFloat = 22
+
     var body: some View {
-        switch placement {
-        case .leading:
-            leadingSidebarToolbar
-        case .bottom:
-            bottomToolbarGrid
+        VStack(spacing: 10) {
+            RadialToolDialView(
+                diameter: dialDiameter,
+                innerRadiusRatio: 0.5,
+                undoStackIsEmpty: undoStackIsEmpty,
+                redoStackIsEmpty: redoStackIsEmpty,
+                interactionMode: interactionMode,
+                drawingTool: drawingTool,
+                drawingWidth: drawingWidth,
+                drawingOpacity: drawingOpacity,
+                drawingColor: drawingColor,
+                showStrokeSettings: $showStrokeSettings,
+                onUndo: onUndo,
+                onRedo: onRedo,
+                onTextMode: onTextMode,
+                onToolSelected: onToolSelected,
+                onCustomColorSelected: onCustomColorSelected
+            )
+            radialPaletteStrip
+        }
+        .frame(maxWidth: paletteMaxWidth, alignment: .leading)
+        .popover(isPresented: $showStrokeSettings) {
+            strokeSettingsPopoverContent
+                .presentationCompactAdaptation(.popover)
         }
     }
 
-    /// Ліва колонка: ряд 1 — дії й інструменти; ряд 2 — палітра й стиль; ряд 3 — товщина та opacity.
-    private var leadingSidebarToolbar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    Button { onUndo() } label: {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 18, weight: .medium))
-                            .frame(width: 40, height: 40)
-                            .background(Circle().fill(Color(UIColor.systemBackground).opacity(0.72)))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(undoStackIsEmpty)
-                    .opacity(undoStackIsEmpty ? 0.45 : 1)
-                    .accessibilityLabel("Скасувати")
-
-                    Button { onRedo() } label: {
-                        Image(systemName: "arrow.uturn.forward")
-                            .font(.system(size: 18, weight: .medium))
-                            .frame(width: 40, height: 40)
-                            .background(Circle().fill(Color(UIColor.systemBackground).opacity(0.72)))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(redoStackIsEmpty)
-                    .opacity(redoStackIsEmpty ? 0.45 : 1)
-                    .accessibilityLabel("Повторити")
-
-                    Button { onTextMode() } label: {
-                        Image(systemName: "text.cursor")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(interactionMode == .text ? Color.accentColor : Color.primary)
-                            .frame(width: 40, height: 40)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(interactionMode == .text ? Color.accentColor.opacity(0.13) : Color(UIColor.systemBackground).opacity(0.7))
+    private var radialPaletteStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
+                    Button { onPaletteColorSelected(idx, color) } label: {
+                        RoundedRectangle(cornerRadius: paletteChipCorner, style: .continuous)
+                            .fill(color)
+                            .frame(width: paletteChipW, height: paletteChipH)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: paletteChipCorner, style: .continuous)
+                                    .stroke(Color.white.opacity(0.75), lineWidth: 1)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: paletteChipCorner, style: .continuous)
+                                    .stroke(selectedPaletteColorIndex == idx ? Color.accentColor : Color.clear, lineWidth: 2.5)
                             )
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Текст")
+                    .accessibilityLabel("Колір \(idx + 1)")
+                }
 
-                    ForEach(DrawingToolKind.allCases) { tool in
-                        Button { onToolSelected(tool) } label: {
-                            Image(systemName: tool.icon)
-                                .font(.system(size: 20, weight: .medium))
-                                .foregroundStyle(interactionMode == .draw && drawingTool == tool ? Color.accentColor : Color.primary)
-                                .frame(width: 40, height: 40)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .fill(interactionMode == .draw && drawingTool == tool ? Color.accentColor.opacity(0.13) : Color(UIColor.systemBackground).opacity(0.7))
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(tool.title)
-                    }
-                }
-            }
+                ColorPicker(
+                    "",
+                    selection: Binding(get: { drawingColor }, set: onCustomColorSelected),
+                    supportsOpacity: false
+                )
+                .labelsHidden()
+                .frame(width: paletteChipW, height: paletteChipH)
+                .clipShape(RoundedRectangle(cornerRadius: paletteChipCorner, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: paletteChipCorner, style: .continuous)
+                        .stroke(Color.white.opacity(0.75), lineWidth: 1)
+                )
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .center, spacing: 10) {
-                    ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
-                        Button { onPaletteColorSelected(idx, color) } label: {
-                            Circle()
-                                .fill(color)
-                                .frame(width: 30, height: 30)
-                                .overlay(Circle().stroke(Color.white, lineWidth: 2).padding(2))
-                                .overlay(Circle().stroke(selectedPaletteColorIndex == idx ? Color.accentColor : .clear, lineWidth: 3))
+                Menu {
+                    Picker(
+                        "Стиль",
+                        selection: Binding(get: { drawingStyle }, set: onDrawingStyleChanged)
+                    ) {
+                        ForEach(DrawingStyle.allCases) { style in
+                            Text(style.rawValue).tag(style)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Колір \(idx + 1)")
                     }
-                    ColorPicker(
-                        "",
-                        selection: Binding(get: { drawingColor }, set: onCustomColorSelected),
-                        supportsOpacity: false
-                    )
-                    .labelsHidden()
-                    .frame(width: 30, height: 30)
-                    .clipShape(Circle())
-                    .overlay(Circle().stroke(Color.white, lineWidth: 2))
-                    Menu {
-                        Picker(
-                            "Стиль",
-                            selection: Binding(get: { drawingStyle }, set: onDrawingStyleChanged)
-                        ) {
-                            ForEach(DrawingStyle.allCases) { style in
-                                Text(style.rawValue).tag(style)
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "ruler")
-                            .font(.system(size: 18, weight: .regular))
-                            .frame(width: 40, height: 40)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(Color(UIColor.systemBackground).opacity(0.7)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Лінійка та стиль")
+                } label: {
+                    Image(systemName: "lineweight")
+                        .font(.system(size: 14, weight: .medium))
+                        .frame(width: 36, height: paletteChipH)
+                        .background(
+                            RoundedRectangle(cornerRadius: paletteChipCorner, style: .continuous)
+                                .fill(Material.ultraThinMaterial)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: paletteChipCorner, style: .continuous)
+                                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                        )
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Стиль штриха")
             }
-
-            VStack(alignment: .leading, spacing: 8) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Товщина \(Int(drawingWidth))")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Slider(
-                        value: Binding(get: { drawingWidth }, set: onDrawingWidthChanged),
-                        in: 1...24,
-                        step: 1
-                    )
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Opacity \(Int(drawingOpacity * 100))%")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Slider(
-                        value: Binding(get: { drawingOpacity }, set: onDrawingOpacityChanged),
-                        in: 0.05...1,
-                        step: 0.05
-                    )
-                    .accessibilityLabel("Opacity")
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 2)
+            .padding(.vertical, 4)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 8)
     }
 
-    private var bottomToolbarGrid: some View {
-        let innerW = max(1, dockFrameSize.width - 16)
-        let innerH = max(1, dockFrameSize.height - 16)
-        let spacing: CGFloat = 5
-        let minCellWidth: CGFloat = 88
-        let availableWidth = max(1, innerW - 20)
-        let columnsCount = max(1, Int((availableWidth + spacing) / (minCellWidth + spacing)))
-        let columns = Array(repeating: GridItem(.flexible(minimum: minCellWidth, maximum: 220), spacing: spacing), count: columnsCount)
-        let sliderGridSpan = min(2, columnsCount)
-
-        return ScrollView(.vertical) {
-                LazyVGrid(columns: columns, alignment: .leading, spacing: spacing) {
-                    Button { onUndo() } label: {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 20, weight: .medium))
-                            .frame(width: 42, height: 42)
-                            .background(Circle().fill(Color(UIColor.systemBackground).opacity(0.72)))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(undoStackIsEmpty)
-                    .opacity(undoStackIsEmpty ? 0.45 : 1)
-                    .accessibilityLabel("Скасувати")
-                    .frame(maxWidth: .infinity, minHeight: 56)
-
-                    Button { onRedo() } label: {
-                        Image(systemName: "arrow.uturn.forward")
-                            .font(.system(size: 20, weight: .medium))
-                            .frame(width: 42, height: 42)
-                            .background(Circle().fill(Color(UIColor.systemBackground).opacity(0.72)))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(redoStackIsEmpty)
-                    .opacity(redoStackIsEmpty ? 0.45 : 1)
-                    .accessibilityLabel("Повторити")
-                    .frame(maxWidth: .infinity, minHeight: 56)
-
-                    Button { onTextMode() } label: {
-                        VStack(spacing: 4) {
-                            Image(systemName: "text.cursor")
-                                .font(.system(size: 22, weight: .medium))
-                                .foregroundStyle(interactionMode == .text ? Color.accentColor : Color.primary)
-                                .frame(width: 46, height: 46)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .fill(interactionMode == .text ? Color.accentColor.opacity(0.13) : Color(UIColor.systemBackground).opacity(0.7))
-                                )
-                            Image(systemName: "triangle.fill")
-                                .font(.system(size: 7))
-                                .foregroundStyle(interactionMode == .text ? Color.accentColor : .clear)
-                                .offset(y: 1)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Текст")
-                    .frame(maxWidth: .infinity, minHeight: 56)
-
-                    ForEach(DrawingToolKind.allCases) { tool in
-                        Button { onToolSelected(tool) } label: {
-                            VStack(spacing: 4) {
-                                Image(systemName: tool.icon)
-                                    .font(.system(size: 22, weight: .medium))
-                                    .foregroundStyle(interactionMode == .draw && drawingTool == tool ? Color.accentColor : Color.primary)
-                                    .frame(width: 46, height: 46)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .fill(interactionMode == .draw && drawingTool == tool ? Color.accentColor.opacity(0.13) : Color(UIColor.systemBackground).opacity(0.7))
-                                    )
-                                Image(systemName: "triangle.fill")
-                                    .font(.system(size: 7))
-                                    .foregroundStyle(interactionMode == .draw && drawingTool == tool ? Color.accentColor : .clear)
-                                    .offset(y: 1)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(tool.title)
-                        .frame(maxWidth: .infinity, minHeight: 56)
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Товщина \(Int(drawingWidth))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Slider(
-                            value: Binding(
-                                get: { drawingWidth },
-                                set: onDrawingWidthChanged
-                            ),
-                            in: 1...24,
-                            step: 1
-                        )
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 56)
-                    .gridCellColumns(sliderGridSpan)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Opacity \(Int(drawingOpacity * 100))%")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Slider(
-                            value: Binding(
-                                get: { drawingOpacity },
-                                set: onDrawingOpacityChanged
-                            ),
-                            in: 0.05...1,
-                            step: 0.05
-                        )
-                        .accessibilityLabel("Opacity")
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 56)
-                    .gridCellColumns(sliderGridSpan)
-
-                    ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
-                        Button { onPaletteColorSelected(idx, color) } label: {
-                            Circle()
-                                .fill(color)
-                                .frame(width: 32, height: 32)
-                                .overlay(Circle().stroke(Color.white, lineWidth: 2).padding(2))
-                                .overlay(Circle().stroke(selectedPaletteColorIndex == idx ? Color.accentColor : .clear, lineWidth: 3))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Колір \(idx + 1)")
-                        .frame(maxWidth: .infinity, minHeight: 56)
-                    }
-
-                    ColorPicker(
-                        "",
-                        selection: Binding(
-                            get: { drawingColor },
-                            set: onCustomColorSelected
-                        ),
-                        supportsOpacity: false
-                    )
-                    .labelsHidden()
-                    .frame(width: 32, height: 32)
-                    .clipShape(Circle())
-                    .overlay(Circle().stroke(Color.white, lineWidth: 2))
-                    .frame(maxWidth: .infinity, minHeight: 56)
-
-                    Menu {
-                        Picker(
-                            "Стиль",
-                            selection: Binding(
-                                get: { drawingStyle },
-                                set: onDrawingStyleChanged
-                            )
-                        ) {
-                            ForEach(DrawingStyle.allCases) { style in
-                                Text(style.rawValue).tag(style)
-                            }
-                        }
-                    } label: {
-                        VStack(spacing: 4) {
-                            Image(systemName: "ruler")
-                                .font(.system(size: 20, weight: .regular))
-                                .frame(width: 46, height: 46)
-                                .background(RoundedRectangle(cornerRadius: 12).fill(Color(UIColor.systemBackground).opacity(0.7)))
-                            Image(systemName: "triangle.fill")
-                                .font(.system(size: 7))
-                                .foregroundStyle(.clear)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Лінійка та стиль")
-                    .frame(maxWidth: .infinity, minHeight: 56)
-                }
-                .frame(maxWidth: .infinity, minHeight: max(1, innerH - 2), alignment: .topLeading)
+    private var strokeSettingsPopoverContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Перо")
+                .font(.subheadline.weight(.semibold))
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Товщина \(Int(drawingWidth))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Slider(
+                    value: Binding(get: { drawingWidth }, set: onDrawingWidthChanged),
+                    in: 1...24,
+                    step: 1
+                )
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Непрозорість \(Int(drawingOpacity * 100))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Slider(
+                    value: Binding(get: { drawingOpacity }, set: onDrawingOpacityChanged),
+                    in: 0.05...1,
+                    step: 0.05
+                )
+                .accessibilityLabel("Непрозорість")
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 280)
     }
 }

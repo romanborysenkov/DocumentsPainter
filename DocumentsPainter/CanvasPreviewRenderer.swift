@@ -10,8 +10,17 @@ enum CanvasPreviewRenderer {
     }
 
     static func image(from state: CanvasStateDTO) -> UIImage? {
-        let strokes = state.strokes.map(\.strokeItem)
-        let lines = state.importedTextLines.map(\.importedTextLine)
+        let artIds: [UUID]
+        let fallback: UUID
+        if let dtos = state.artLayers, !dtos.isEmpty {
+            artIds = dtos.map(\.id)
+            fallback = artIds[0]
+        } else {
+            fallback = UUID()
+            artIds = [fallback]
+        }
+        let strokes = state.strokes.map { $0.strokeItem(fallbackLayerId: fallback) }
+        let lines = state.importedTextLines.map { $0.importedTextLine(fallbackLayerId: fallback) }
         var bounds = CGRect.null
         for s in strokes {
             for p in s.points {
@@ -35,8 +44,10 @@ enum CanvasPreviewRenderer {
         format.scale = 1
         let renderer = UIGraphicsImageRenderer(size: previewSize, format: format)
         return renderer.image { ctx in
+            let bg = CanvasBackgroundKind.decode(from: state.canvasBackground)
             UIColor.white.setFill()
             ctx.fill(CGRect(origin: .zero, size: previewSize))
+            drawBackgroundPattern(bg, in: ctx.cgContext, size: previewSize)
 
             let cg = ctx.cgContext
             cg.saveGState()
@@ -45,31 +56,75 @@ enum CanvasPreviewRenderer {
             cg.translateBy(x: tx, y: ty)
             cg.scaleBy(x: scale, y: scale)
 
-            for line in lines {
-                let ns = line.text as NSString
-                let font = UIFont.systemFont(ofSize: line.fontSize)
-                let color = UIColor(line.color)
-                ns.draw(
-                    at: line.position,
-                    withAttributes: [.font: font, .foregroundColor: color]
-                )
-            }
-
-            for stroke in strokes {
-                guard stroke.points.count > 1 else { continue }
-                cg.setStrokeColor(UIColor(stroke.color).cgColor)
-                cg.setLineWidth(max(1, stroke.width))
-                cg.setLineCap(.round)
-                cg.setLineJoin(.round)
-                cg.setAlpha(CGFloat(stroke.opacity))
-                cg.beginPath()
-                cg.move(to: stroke.points[0])
-                for p in stroke.points.dropFirst() {
-                    cg.addLine(to: p)
+            for lid in artIds {
+                for line in lines where line.layerId == lid {
+                    EditorCanvasHelpers.highlightedAttributedString(line).draw(at: line.position)
                 }
-                cg.strokePath()
+                for stroke in strokes where stroke.layerId == lid {
+                    guard stroke.points.count > 1 else { continue }
+                    cg.setStrokeColor(UIColor(stroke.color).cgColor)
+                    cg.setLineWidth(max(1, stroke.width))
+                    cg.setLineCap(.round)
+                    cg.setLineJoin(.round)
+                    cg.setAlpha(CGFloat(stroke.opacity))
+                    cg.beginPath()
+                    cg.move(to: stroke.points[0])
+                    for p in stroke.points.dropFirst() {
+                        cg.addLine(to: p)
+                    }
+                    cg.strokePath()
+                }
             }
             cg.restoreGState()
+        }
+    }
+
+    private static func drawBackgroundPattern(_ kind: CanvasBackgroundKind, in cg: CGContext, size: CGSize) {
+        switch kind {
+        case .blank:
+            return
+        case .dots:
+            let spacing: CGFloat = 20
+            let r: CGFloat = 0.8
+            cg.setFillColor(UIColor.black.withAlphaComponent(0.16).cgColor)
+            var x: CGFloat = 0
+            while x <= size.width {
+                var y: CGFloat = 0
+                while y <= size.height {
+                    cg.fillEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+                    y += spacing
+                }
+                x += spacing
+            }
+        case .lines:
+            let spacing: CGFloat = 28
+            cg.setStrokeColor(UIColor.black.withAlphaComponent(0.08).cgColor)
+            cg.setLineWidth(1)
+            var y: CGFloat = 0
+            while y <= size.height {
+                cg.move(to: CGPoint(x: 0, y: y))
+                cg.addLine(to: CGPoint(x: size.width, y: y))
+                cg.strokePath()
+                y += spacing
+            }
+        case .grid:
+            let spacing: CGFloat = 28
+            cg.setStrokeColor(UIColor.black.withAlphaComponent(0.09).cgColor)
+            cg.setLineWidth(1)
+            var y: CGFloat = 0
+            while y <= size.height {
+                cg.move(to: CGPoint(x: 0, y: y))
+                cg.addLine(to: CGPoint(x: size.width, y: y))
+                cg.strokePath()
+                y += spacing
+            }
+            var x: CGFloat = 0
+            while x <= size.width {
+                cg.move(to: CGPoint(x: x, y: 0))
+                cg.addLine(to: CGPoint(x: x, y: size.height))
+                cg.strokePath()
+                x += spacing
+            }
         }
     }
 }
