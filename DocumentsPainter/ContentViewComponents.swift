@@ -130,6 +130,8 @@ struct SearchPanelView: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Пошук", text: $searchQuery)
+                    .foregroundStyle(.black)
+                    .tint(.black)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                 if !searchQuery.isEmpty {
@@ -326,7 +328,7 @@ struct ArtLayersPanelView: View {
                         }
                     }
                 }
-                .frame(maxHeight: listMaxHeight ?? .infinity)
+                .frame(height: visibleLayerListHeight)
             }
         }
         .frame(width: panelFrameWidth, alignment: .topLeading)
@@ -349,6 +351,19 @@ struct ArtLayersPanelView: View {
     private var panelPadding: CGFloat {
         if floatOnCanvas { return 0 }
         return useSidebarColumnWidth ? 8 : 12
+    }
+
+    private var visibleLayerListHeight: CGFloat {
+        let rowHeight: CGFloat = 34
+        let rowSpacing: CGFloat = 6
+        let count = CGFloat(artLayers.count)
+        guard count > 0 else { return 0 }
+
+        let contentHeight = (rowHeight * count) + (rowSpacing * max(0, count - 1))
+        if let listMaxHeight {
+            return min(contentHeight, listMaxHeight)
+        }
+        return contentHeight
     }
 
     @ViewBuilder

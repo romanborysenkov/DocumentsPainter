@@ -4,6 +4,7 @@ import UIKit
 struct SelectableTextView: UIViewRepresentable {
     @Binding var text: String
     @Binding var selectedRange: NSRange
+    var textColor: UIColor = .black
 
     class Coordinator: NSObject, UITextViewDelegate, UIScribbleInteractionDelegate {
         var parent: SelectableTextView
@@ -36,6 +37,8 @@ struct SelectableTextView: UIViewRepresentable {
         tv.isScrollEnabled = true
         tv.backgroundColor = .clear
         tv.font = UIFont.systemFont(ofSize: 17)
+        tv.textColor = textColor
+        tv.typingAttributes[.foregroundColor] = textColor
         tv.isSelectable = true
         tv.delegate = context.coordinator
         if #available(iOS 14.0, *) {
@@ -53,6 +56,10 @@ struct SelectableTextView: UIViewRepresentable {
         if uiView.text != text {
             uiView.text = text
         }
+        if uiView.textColor != textColor {
+            uiView.textColor = textColor
+        }
+        uiView.typingAttributes[.foregroundColor] = textColor
 
         let length = (text as NSString).length
         let range = selectedRange

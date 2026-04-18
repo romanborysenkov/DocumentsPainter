@@ -68,19 +68,12 @@ struct EditorCompositeCanvasLayer: View {
 
             for layerId in orderedVisibleLayerIds {
                 for line in visibleLinesByLayer[layerId] ?? [] {
-                    if hasSearch {
-                        let matches = EditorCanvasHelpers.searchRanges(in: line.text, query: searchQuery)
-                        for m in matches {
-                            let startX = EditorCanvasHelpers.textWidthPrefix(line.text, length: m.location, fontSize: line.fontSize)
-                            let endX = EditorCanvasHelpers.textWidthPrefix(line.text, length: m.location + m.length, fontSize: line.fontSize)
-                            let contentRect = CGRect(x: line.position.x + startX, y: line.position.y, width: max(1, endX - startX), height: line.fontSize * 1.3)
-                            let o = EditorCanvasHelpers.contentToView(CGPoint(x: contentRect.minX, y: contentRect.minY), scale: scale, offset: offset)
-                            let vr = CGRect(x: o.x, y: o.y, width: contentRect.width * scale, height: contentRect.height * scale)
-                            context.fill(Path(roundedRect: vr.insetBy(dx: -1, dy: -1), cornerRadius: 3), with: .color(.yellow.opacity(0.45)))
-                        }
-                    }
+                    let renderedText: Text = hasSearch
+                        ? EditorCanvasHelpers.highlightedText(line, query: searchQuery)
+                        : EditorCanvasHelpers.highlightedText(line, query: "")
+
                     context.draw(
-                        Text(line.text).font(.system(size: line.fontSize * scale)).foregroundColor(line.color),
+                        renderedText.font(.system(size: line.fontSize * scale)),
                         at: EditorCanvasHelpers.contentToView(line.position, scale: scale, offset: offset),
                         anchor: .topLeading
                     )

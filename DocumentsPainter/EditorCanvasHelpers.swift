@@ -3,6 +3,7 @@ import UIKit
 
 enum EditorCanvasHelpers {
     private static let textWidthCache = NSCache<NSString, NSNumber>()
+    private static let searchHighlightColor = Color.yellow.opacity(0.55)
 
     static func contentToView(_ point: CGPoint, scale: CGFloat, offset: CGSize) -> CGPoint {
         CGPoint(x: point.x * scale + offset.width, y: point.y * scale + offset.height)
@@ -33,6 +34,142 @@ enum EditorCanvasHelpers {
             range = NSRange(location: next, length: ns.length - next)
         }
         return result
+    }
+
+    static func highlightedText(_ line: ImportedTextLine, query: String) -> Text {
+        var attributed = AttributedString(line.text)
+        attributed.foregroundColor = line.color
+
+        let persisted = sanitizedHighlights(line.backgroundHighlights, text: line.text)
+        for highlight in persisted {
+            let nsRange = NSRange(location: highlight.location, length: highlight.length)
+            guard let range = Range(nsRange, in: line.text),
+                  let attrRange = Range(range, in: attributed) else { continue }
+            attributed[attrRange].backgroundColor = highlight.color
+        }
+
+        let persistedKeys = Set(persisted.map { "\($0.location):\($0.length)" })
+        for nsRange in searchRanges(in: line.text, query: query) {
+            let key = "\(nsRange.location):\(nsRange.length)"
+            guard !persistedKeys.contains(key),
+                  let range = Range(nsRange, in: line.text),
+                  let attrRange = Range(range, in: attributed) else { continue }
+            attributed[attrRange].backgroundColor = searchHighlightColor
+            attributed[attrRange].foregroundColor = .black
+        }
+
+        return Text(attributed)
+    }
+
+    static func highlightedAttributedString(_ line: ImportedTextLine) -> NSAttributedString {
+        let attributed = NSMutableAttributedString(
+            string: line.text,
+            attributes: [
+                .font: UIFont.systemFont(ofSize: line.fontSize),
+                .foregroundColor: UIColor(line.color)
+            ]
+        )
+        for highlight in sanitizedHighlights(line.backgroundHighlights, text: line.text) {
+            let nsRange = NSRange(location: highlight.location, length: highlight.length)
+            attributed.addAttribute(.backgroundColor, value: UIColor(highlight.color), range: nsRange)
+        }
+        return attributed
+    }
+
+    static func mergedHighlights(
+        existing: [TextBackgroundHighlight],
+        addingRanges: [NSRange],
+        color: Color,
+        text: String
+    ) -> [TextBackgroundHighlight] {
+        let sanitizedExisting = sanitizedHighlights(existing, text: text)
+        let sanitizedAdding = addingRanges.filter {
+            $0.length > 0 && $0.location >= 0 && $0.location + $0.length <= (text as NSString).length
+        }
+        guard !sanitizedAdding.isEmpty else { return sanitizedExisting }
+
+        func intersects(_ a: NSRange, _ b: NSRange) -> Bool {
+            NSIntersectionRange(a, b).length > 0
+        }
+
+        let keptExisting = sanitizedExisting.filter { item in
+            let r = NSRange(location: item.location, length: item.length)
+            return !sanitizedAdding.contains(where: { intersects(r, $0) })
+        }
+
+        let added = sanitizedAdding.map {
+            TextBackgroundHighlight(location: $0.location, length: $0.length, color: color)
+        }
+        return (keptExisting + added).sorted { lhs, rhs in
+            if lhs.location == rhs.location { return lhs.length < rhs.length }
+            return lhs.location < rhs.location
+        }
+    }
+
+    static func expandRangesToWholeWords(_ ranges: [NSRange], in text: String) -> [NSRange] {
+        let ns = text as NSString
+        let length = ns.length
+        guard length > 0 else { return [] }
+
+        func isWordScalar(_ scalar: UnicodeScalar) -> Bool {
+            if CharacterSet.alphanumerics.contains(scalar) { return true }
+            switch scalar {
+            case "'", "’", "-", "_":
+                return true
+            default:
+                return false
+            }
+        }
+
+        func isWordIndex(_ index: Int) -> Bool {
+            guard index >= 0, index < length,
+                  let scalar = UnicodeScalar(ns.character(at: index)) else { return false }
+            return isWordScalar(scalar)
+        }
+
+        var result: [NSRange] = []
+        result.reserveCapacity(ranges.count)
+
+        for raw in ranges where raw.length > 0 && raw.location >= 0 && raw.location + raw.length <= length {
+            var start = raw.location
+            var end = raw.location + raw.length
+
+            while start > 0, isWordIndex(start - 1) { start -= 1 }
+            while end < length, isWordIndex(end) { end += 1 }
+
+            let expanded = NSRange(location: start, length: max(0, end - start))
+            if expanded.length > 0 {
+                result.append(expanded)
+            }
+        }
+
+        // Дедуп і склейка перетинів, щоб уникнути дублювань одного слова.
+        let sorted = result.sorted { lhs, rhs in
+            if lhs.location == rhs.location { return lhs.length < rhs.length }
+            return lhs.location < rhs.location
+        }
+        guard var current = sorted.first else { return [] }
+        var merged: [NSRange] = []
+        for next in sorted.dropFirst() {
+            let currentEnd = current.location + current.length
+            if next.location <= currentEnd {
+                let nextEnd = next.location + next.length
+                current.length = max(currentEnd, nextEnd) - current.location
+            } else {
+                merged.append(current)
+                current = next
+            }
+        }
+        merged.append(current)
+        return merged
+    }
+
+    static func sanitizedHighlights(_ highlights: [TextBackgroundHighlight], text: String) -> [TextBackgroundHighlight] {
+        let length = (text as NSString).length
+        return highlights.compactMap { item in
+            guard item.length > 0, item.location >= 0, item.location + item.length <= length else { return nil }
+            return item
+        }
     }
 
     static func textWidthPrefix(_ text: String, length: Int, fontSize: CGFloat) -> CGFloat {

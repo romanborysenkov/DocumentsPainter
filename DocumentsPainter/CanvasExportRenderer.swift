@@ -121,6 +121,16 @@ enum CanvasExportRenderer {
 
         for layerId in model.orderedLayerIds {
             for textLine in model.textByLayer[layerId] ?? [] {
+                for highlight in EditorCanvasHelpers.sanitizedHighlights(textLine.backgroundHighlights, text: textLine.text) {
+                    let startX = EditorCanvasHelpers.textWidthPrefix(textLine.text, length: highlight.location, fontSize: textLine.fontSize)
+                    let endX = EditorCanvasHelpers.textWidthPrefix(textLine.text, length: highlight.location + highlight.length, fontSize: textLine.fontSize)
+                    let x = textLine.position.x - canvas.minX + startX
+                    let y = textLine.position.y - canvas.minY
+                    let width = max(1, endX - startX)
+                    let height = max(1, textLine.fontSize * 1.3)
+                    let fill = svgColor(UIColor(highlight.color))
+                    lines.append(#"<rect x="\#(fmt(x))" y="\#(fmt(y))" width="\#(fmt(width))" height="\#(fmt(height))" rx="2" ry="2" fill="\#(fill)"/>"#)
+                }
                 let color = svgColor(UIColor(textLine.color))
                 let escaped = xmlEscaped(textLine.text)
                 let x = textLine.position.x - canvas.minX
@@ -162,14 +172,7 @@ enum CanvasExportRenderer {
         cg.concatenate(transform)
         for layerId in model.orderedLayerIds {
             for textLine in model.textByLayer[layerId] ?? [] {
-                let ns = textLine.text as NSString
-                ns.draw(
-                    at: textLine.position,
-                    withAttributes: [
-                        .font: UIFont.systemFont(ofSize: textLine.fontSize),
-                        .foregroundColor: UIColor(textLine.color)
-                    ]
-                )
+                EditorCanvasHelpers.highlightedAttributedString(textLine).draw(at: textLine.position)
             }
             for stroke in model.strokesByLayer[layerId] ?? [] {
                 drawStroke(stroke, in: cg)

@@ -58,13 +58,7 @@ enum CanvasPreviewRenderer {
 
             for lid in artIds {
                 for line in lines where line.layerId == lid {
-                    let ns = line.text as NSString
-                    let font = UIFont.systemFont(ofSize: line.fontSize)
-                    let color = UIColor(line.color)
-                    ns.draw(
-                        at: line.position,
-                        withAttributes: [.font: font, .foregroundColor: color]
-                    )
+                    EditorCanvasHelpers.highlightedAttributedString(line).draw(at: line.position)
                 }
                 for stroke in strokes where stroke.layerId == lid {
                     guard stroke.points.count > 1 else { continue }

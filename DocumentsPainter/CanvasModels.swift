@@ -173,6 +173,13 @@ struct ImportedTextLine: Identifiable {
     var position: CGPoint
     var fontSize: CGFloat
     var color: Color
+    var backgroundHighlights: [TextBackgroundHighlight] = []
+}
+
+struct TextBackgroundHighlight {
+    var location: Int
+    var length: Int
+    var color: Color
 }
 
 extension ImportedTextLine {
@@ -186,7 +193,8 @@ extension ImportedTextLine {
             text: text,
             position: position,
             fontSize: fontSize,
-            color: color
+            color: color,
+            backgroundHighlights: []
         )
     }
 
@@ -205,19 +213,40 @@ extension ImportedTextLine {
         let selectedWidth = (selectedText as NSString).size(withAttributes: [.font: font]).width
         let spacing = max(8, fontSize * 0.6)
 
+        func highlights(in target: NSRange, shiftBy shift: Int) -> [TextBackgroundHighlight] {
+            backgroundHighlights.compactMap { highlight in
+                guard highlight.length > 0 else { return nil }
+                let source = NSRange(location: highlight.location, length: highlight.length)
+                let intersection = NSIntersectionRange(source, target)
+                guard intersection.length > 0 else { return nil }
+                return TextBackgroundHighlight(
+                    location: intersection.location + shift,
+                    length: intersection.length,
+                    color: highlight.color
+                )
+            }
+        }
+
+        let leftRange = NSRange(location: 0, length: range.location)
+        let selectedRange = NSRange(location: range.location, length: range.length)
+        let rightRange = NSRange(location: range.location + range.length, length: max(0, length - range.location - range.length))
+
         let left = leftText.isEmpty ? nil : ImportedTextLine(
             id: UUID(), documentId: documentId, groupId: groupId, order: order, layerId: layerId,
-            text: leftText, position: position, fontSize: fontSize, color: color
+            text: leftText, position: position, fontSize: fontSize, color: color,
+            backgroundHighlights: highlights(in: leftRange, shiftBy: 0)
         )
         let selected = selectedText.isEmpty ? nil : ImportedTextLine(
             id: UUID(), documentId: documentId, groupId: groupId, order: order + 1, layerId: layerId,
             text: selectedText,
-            position: CGPoint(x: position.x + leftWidth + spacing, y: position.y), fontSize: fontSize, color: color
+            position: CGPoint(x: position.x + leftWidth + spacing, y: position.y), fontSize: fontSize, color: color,
+            backgroundHighlights: highlights(in: selectedRange, shiftBy: -range.location)
         )
         let right = rightText.isEmpty ? nil : ImportedTextLine(
             id: UUID(), documentId: documentId, groupId: groupId, order: order + 2, layerId: layerId,
             text: rightText,
-            position: CGPoint(x: position.x + leftWidth + selectedWidth + spacing * 2, y: position.y), fontSize: fontSize, color: color
+            position: CGPoint(x: position.x + leftWidth + selectedWidth + spacing * 2, y: position.y), fontSize: fontSize, color: color,
+            backgroundHighlights: highlights(in: rightRange, shiftBy: -(range.location + range.length))
         )
         return (left, selected, right)
     }
@@ -289,6 +318,13 @@ struct ImportedTextLineDTO: Codable {
     var text: String
     var position: CGPointDTO
     var fontSize: Double
+    var color: RGBAColorDTO
+    var backgroundHighlights: [TextBackgroundHighlightDTO]?
+}
+
+struct TextBackgroundHighlightDTO: Codable {
+    var location: Int
+    var length: Int
     var color: RGBAColorDTO
 }
 
@@ -381,6 +417,7 @@ extension ImportedTextLineDTO {
         position = CGPointDTO(line.position)
         fontSize = line.fontSize
         color = RGBAColorDTO(line.color)
+        backgroundHighlights = line.backgroundHighlights.map(TextBackgroundHighlightDTO.init)
     }
 
     func importedTextLine(fallbackLayerId: UUID) -> ImportedTextLine {
@@ -393,6 +430,23 @@ extension ImportedTextLineDTO {
             text: text,
             position: position.cgPoint,
             fontSize: fontSize,
+            color: color.swiftUIColor,
+            backgroundHighlights: (backgroundHighlights ?? []).map(\.highlight)
+        )
+    }
+}
+
+extension TextBackgroundHighlightDTO {
+    init(_ highlight: TextBackgroundHighlight) {
+        location = highlight.location
+        length = highlight.length
+        color = RGBAColorDTO(highlight.color)
+    }
+
+    var highlight: TextBackgroundHighlight {
+        TextBackgroundHighlight(
+            location: location,
+            length: length,
             color: color.swiftUIColor
         )
     }
