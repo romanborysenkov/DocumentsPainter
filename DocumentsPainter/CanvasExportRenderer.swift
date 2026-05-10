@@ -38,6 +38,8 @@ struct CanvasExportSnapshot {
     var hiddenStrokeIds: Set<UUID>
     var textLines: [ImportedTextLine]
     var hiddenTextLineIds: Set<UUID>
+    var imageItems: [ImportedImageItem]
+    var hiddenImageItemIds: Set<UUID>
 }
 
 enum CanvasExportRenderer {
@@ -138,6 +140,13 @@ enum CanvasExportRenderer {
                 lines.append(#"<text x="\#(fmt(x))" y="\#(fmt(y))" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="\#(fmt(textLine.fontSize))" fill="\#(color)">\#(escaped)</text>"#)
             }
 
+            for item in model.imagesByLayer[layerId] ?? [] {
+                let x = item.position.x - canvas.minX
+                let y = item.position.y - canvas.minY
+                let data = item.imageData.base64EncodedString()
+                lines.append(#"<image x="\#(fmt(x))" y="\#(fmt(y))" width="\#(fmt(item.size.width))" height="\#(fmt(item.size.height))" href="data:image/png;base64,\#(data)"/>"#)
+            }
+
             for stroke in model.strokesByLayer[layerId] ?? [] {
                 guard let first = stroke.points.first else { continue }
                 if stroke.points.count == 1 {
@@ -173,6 +182,11 @@ enum CanvasExportRenderer {
         for layerId in model.orderedLayerIds {
             for textLine in model.textByLayer[layerId] ?? [] {
                 EditorCanvasHelpers.highlightedAttributedString(textLine).draw(at: textLine.position)
+            }
+            for item in model.imagesByLayer[layerId] ?? [] {
+                if let image = UIImage(data: item.imageData) {
+                    image.draw(in: CGRect(origin: item.position, size: item.size))
+                }
             }
             for stroke in model.strokesByLayer[layerId] ?? [] {
                 drawStroke(stroke, in: cg)
@@ -345,6 +359,7 @@ private struct ExportModel {
     let orderedLayerIds: [UUID]
     let strokesByLayer: [UUID: [StrokeItem]]
     let textByLayer: [UUID: [ImportedTextLine]]
+    let imagesByLayer: [UUID: [ImportedImageItem]]
     let exportRect: CGRect
 
     var hasContent: Bool {
@@ -367,9 +382,17 @@ private struct ExportModel {
             visibleLayerSet.contains($0.layerId) &&
             !$0.text.isEmpty
         }
+        let visibleImages = snapshot.imageItems.filter {
+            !snapshot.hiddenImageItemIds.contains($0.id) &&
+            visibleLayerSet.contains($0.layerId) &&
+            $0.size.width > 0 &&
+            $0.size.height > 0 &&
+            UIImage(data: $0.imageData) != nil
+        }
 
         strokesByLayer = Dictionary(grouping: visibleStrokes, by: \.layerId)
         textByLayer = Dictionary(grouping: visibleText, by: \.layerId)
+        imagesByLayer = Dictionary(grouping: visibleImages, by: \.layerId)
 
         var bounds = CGRect.null
         for stroke in visibleStrokes {
@@ -400,6 +423,9 @@ private struct ExportModel {
                 width: max(1, width),
                 height: max(1, line.fontSize * 1.35)
             ))
+        }
+        for item in visibleImages {
+            bounds = bounds.union(CGRect(origin: item.position, size: item.size))
         }
         if bounds.isNull || bounds.isEmpty {
             exportRect = .null

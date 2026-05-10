@@ -3,10 +3,18 @@ import UIKit
 import Foundation
 
 enum DrawingStyle: String, CaseIterable, Identifiable {
-    case solid = "Суцільна"
-    case dashed = "Пунктир"
-    case dotted = "Крапки"
+    case solid
+    case dashed
+    case dotted
     var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .solid: return AppLocalization.t("Суцільна", "Solid")
+        case .dashed: return AppLocalization.t("Пунктир", "Dashed")
+        case .dotted: return AppLocalization.t("Крапки", "Dotted")
+        }
+    }
 }
 
 enum DrawingToolKind: String, CaseIterable, Identifiable {
@@ -20,11 +28,11 @@ enum DrawingToolKind: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .cursor: return "Курсор"
-        case .pencil: return "Олівець"
-        case .pen: return "Ручка"
-        case .marker: return "Маркер"
-        case .eraser: return "Гумка"
+        case .cursor: return AppLocalization.t("Курсор", "Cursor")
+        case .pencil: return AppLocalization.t("Олівець", "Pencil")
+        case .pen: return AppLocalization.t("Ручка", "Pen")
+        case .marker: return AppLocalization.t("Маркер", "Marker")
+        case .eraser: return AppLocalization.t("Гумка", "Eraser")
         }
     }
 
@@ -57,9 +65,16 @@ enum DrawingToolKind: String, CaseIterable, Identifiable {
 }
 
 enum InteractionMode: String, CaseIterable, Identifiable {
-    case draw = "Малювання"
-    case text = "Текст"
+    case draw
+    case text
     var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .draw: return AppLocalization.t("Малювання", "Drawing")
+        case .text: return AppLocalization.t("Текст", "Text")
+        }
+    }
 }
 
 enum PencilTapShortcutAction: String, CaseIterable, Identifiable {
@@ -77,29 +92,29 @@ enum PencilTapShortcutAction: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .none: return "Нічого"
+        case .none: return AppLocalization.t("Нічого", "None")
         case .undo: return "Undo"
         case .redo: return "Redo"
-        case .selectTextTool: return "Інструмент: Текст"
-        case .selectCursorTool: return "Інструмент: Курсор"
-        case .selectPencilTool: return "Інструмент: Олівець"
-        case .selectPenTool: return "Інструмент: Ручка"
-        case .selectMarkerTool: return "Інструмент: Маркер"
-        case .selectEraserTool: return "Інструмент: Гумка"
+        case .selectTextTool: return AppLocalization.t("Інструмент: Текст", "Tool: Text")
+        case .selectCursorTool: return AppLocalization.t("Інструмент: Курсор", "Tool: Cursor")
+        case .selectPencilTool: return AppLocalization.t("Інструмент: Олівець", "Tool: Pencil")
+        case .selectPenTool: return AppLocalization.t("Інструмент: Ручка", "Tool: Pen")
+        case .selectMarkerTool: return AppLocalization.t("Інструмент: Маркер", "Tool: Marker")
+        case .selectEraserTool: return AppLocalization.t("Інструмент: Гумка", "Tool: Eraser")
         }
     }
 
     var shortTitle: String {
         switch self {
-        case .none: return "Нічого"
+        case .none: return AppLocalization.t("Нічого", "None")
         case .undo: return "Undo"
         case .redo: return "Redo"
-        case .selectTextTool: return "Текст"
-        case .selectCursorTool: return "Курсор"
-        case .selectPencilTool: return "Олівець"
-        case .selectPenTool: return "Ручка"
-        case .selectMarkerTool: return "Маркер"
-        case .selectEraserTool: return "Гумка"
+        case .selectTextTool: return AppLocalization.t("Текст", "Text")
+        case .selectCursorTool: return AppLocalization.t("Курсор", "Cursor")
+        case .selectPencilTool: return AppLocalization.t("Олівець", "Pencil")
+        case .selectPenTool: return AppLocalization.t("Ручка", "Pen")
+        case .selectMarkerTool: return AppLocalization.t("Маркер", "Marker")
+        case .selectEraserTool: return AppLocalization.t("Гумка", "Eraser")
         }
     }
 
@@ -128,10 +143,10 @@ enum CanvasBackgroundKind: String, CaseIterable, Identifiable, Codable {
 
     var title: String {
         switch self {
-        case .blank: return "Пустий"
-        case .dots: return "В крапочку"
-        case .lines: return "В лінійку"
-        case .grid: return "В сіточку"
+        case .blank: return AppLocalization.t("Пустий", "Blank")
+        case .dots: return AppLocalization.t("В крапочку", "Dots")
+        case .lines: return AppLocalization.t("В лінійку", "Lines")
+        case .grid: return AppLocalization.t("В сіточку", "Grid")
         }
     }
 
@@ -174,6 +189,14 @@ struct ImportedTextLine: Identifiable {
     var fontSize: CGFloat
     var color: Color
     var backgroundHighlights: [TextBackgroundHighlight] = []
+}
+
+struct ImportedImageItem: Identifiable {
+    var id: UUID = UUID()
+    var layerId: UUID
+    var imageData: Data
+    var position: CGPoint
+    var size: CGSize
 }
 
 struct TextBackgroundHighlight {
@@ -255,6 +278,7 @@ extension ImportedTextLine {
 struct CanvasSnapshot {
     var strokes: [StrokeItem]
     var importedTextLines: [ImportedTextLine]
+    var importedImageItems: [ImportedImageItem]
     var artLayers: [CanvasArtLayer]
     var activeLayerId: UUID
     var hiddenArtLayerIds: Set<UUID>
@@ -287,6 +311,8 @@ struct CanvasStateDTO: Codable {
     var hiddenStrokeIds: [UUID]
     var importedTextLines: [ImportedTextLineDTO]
     var hiddenTextLineIds: [UUID]
+    var importedImageItems: [ImportedImageItemDTO]?
+    var hiddenImageItemIds: [UUID]?
     var layerGroups: [LayerGroupDTO]
     var customLayerNames: [String: String]
     /// Застаріле поле з старих збережень; ігнорується.
@@ -320,6 +346,15 @@ struct ImportedTextLineDTO: Codable {
     var fontSize: Double
     var color: RGBAColorDTO
     var backgroundHighlights: [TextBackgroundHighlightDTO]?
+}
+
+struct ImportedImageItemDTO: Codable {
+    var id: UUID
+    var layerId: UUID?
+    var imageData: Data
+    var position: CGPointDTO
+    var width: Double
+    var height: Double
 }
 
 struct TextBackgroundHighlightDTO: Codable {
@@ -436,6 +471,27 @@ extension ImportedTextLineDTO {
     }
 }
 
+extension ImportedImageItemDTO {
+    init(_ item: ImportedImageItem) {
+        id = item.id
+        layerId = item.layerId
+        imageData = item.imageData
+        position = CGPointDTO(item.position)
+        width = item.size.width
+        height = item.size.height
+    }
+
+    func importedImageItem(fallbackLayerId: UUID) -> ImportedImageItem {
+        ImportedImageItem(
+            id: id,
+            layerId: layerId ?? fallbackLayerId,
+            imageData: imageData,
+            position: position.cgPoint,
+            size: CGSize(width: max(1, width), height: max(1, height))
+        )
+    }
+}
+
 extension TextBackgroundHighlightDTO {
     init(_ highlight: TextBackgroundHighlight) {
         location = highlight.location
@@ -488,20 +544,24 @@ struct LayerGroupSection: Identifiable {
 enum CanvasLayer: Identifiable {
     case stroke(StrokeItem)
     case text(ImportedTextLine)
+    case image(ImportedImageItem)
 
     var id: String {
         switch self {
         case .stroke(let stroke): return "stroke-\(stroke.id.uuidString)"
         case .text(let line): return "textdoc-\(line.documentId.uuidString)"
+        case .image(let item): return "image-\(item.id.uuidString)"
         }
     }
 
     var title: String {
         switch self {
-        case .stroke: return "Малюнок"
+        case .stroke: return AppLocalization.t("Дослідження", "Research")
         case .text(let line):
             let trimmed = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "Текст" : trimmed
+            return trimmed.isEmpty ? AppLocalization.t("Текст", "Text") : trimmed
+        case .image:
+            return AppLocalization.t("Зображення", "Image")
         }
     }
 }
@@ -509,4 +569,5 @@ enum CanvasLayer: Identifiable {
 enum SelectedCanvasItem {
     case stroke(UUID)
     case text(UUID)
+    case image(UUID)
 }

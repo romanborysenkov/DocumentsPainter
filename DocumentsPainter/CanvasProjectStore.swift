@@ -96,6 +96,11 @@ final class CanvasProjectStore: ObservableObject {
         return id
     }
 
+    func writeCanvasData(id: UUID, data: Data) {
+        let url = canvasFileURL(for: id)
+        try? data.write(to: url, options: .atomic)
+    }
+
     func saveMetadata(_ meta: CanvasProjectMetadata) {
         guard let data = try? encoder.encode(meta) else { return }
         let dir = projectDirectory(for: meta.id)
@@ -185,13 +190,13 @@ final class CanvasProjectStore: ObservableObject {
     }
 
     func deleteFolder(id: UUID) {
+        let projectIDsToDelete = projects
+            .filter { $0.folderID == id }
+            .map(\.id)
+        projectIDsToDelete.forEach(deleteProject)
+
         folders.removeAll { $0.id == id }
         saveFolders()
-        for var project in projects where project.folderID == id {
-            project.folderID = nil
-            project.modifiedAt = Date()
-            saveMetadata(project)
-        }
         reload()
     }
 
@@ -247,7 +252,7 @@ final class CanvasProjectStore: ObservableObject {
             UserDefaults.standard.removeObject(forKey: Self.legacyCanvasUserDefaultsKey)
             return
         }
-        let title = "Малюнок"
+        let title = "Дослідження"
         let id = UUID()
         let now = Date()
         let meta = CanvasProjectMetadata(id: id, title: title, createdAt: now, modifiedAt: now, folderID: nil)

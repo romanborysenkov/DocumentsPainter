@@ -13,7 +13,7 @@ struct ImportButtonView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(UIColor.separator).opacity(0.3), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Імпорт")
+        .accessibilityLabel(AppLocalization.t("Імпорт", "Import"))
     }
 }
 
@@ -33,7 +33,7 @@ struct ExportMenuButtonView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(UIColor.separator).opacity(0.3), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Експорт")
+        .accessibilityLabel(AppLocalization.t("Експорт", "Export"))
         .popover(isPresented: $showExportOptions) {
             exportPopoverContent
                 .presentationCompactAdaptation(.popover)
@@ -42,7 +42,7 @@ struct ExportMenuButtonView: View {
 
     private var exportPopoverContent: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Експорт")
+            Text(AppLocalization.t("Експорт", "Export"))
                 .font(.subheadline.weight(.semibold))
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -129,7 +129,7 @@ struct SearchPanelView: View {
             
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Пошук", text: $searchQuery)
+                TextField(AppLocalization.t("Пошук", "Search"), text: $searchQuery)
                     .foregroundStyle(.black)
                     .tint(.black)
                     .textInputAutocapitalization(.never)
@@ -189,12 +189,23 @@ struct LayerThumbnailView: View {
                     )
                 }
             case .text(let line):
-                Text(line.text.isEmpty ? "Текст" : line.text)
+                Text(line.text.isEmpty ? AppLocalization.t("Текст", "Text") : line.text)
                     .font(.system(size: 8))
                     .foregroundStyle(line.color)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                     .padding(.horizontal, 4)
+            case .image(let item):
+                if let image = UIImage(data: item.imageData) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(3)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .frame(width: 42, height: 28)
@@ -245,19 +256,19 @@ struct ArtLayersPanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Слої")
+                Text(AppLocalization.t("Слої", "Layers"))
                     .font(.headline)
                 Spacer()
                 Button { onAddLayer() } label: {
-                    Label("Новий шар", systemImage: "plus.circle.fill")
+                    Label(AppLocalization.t("Новий шар", "New layer"), systemImage: "plus.circle.fill")
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .accessibilityLabel("Новий шар")
+                .accessibilityLabel(AppLocalization.t("Новий шар", "New layer"))
             }
             if artLayers.isEmpty {
-                Text("Немає шарів")
+                Text(AppLocalization.t("Немає шарів", "No layers"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -281,7 +292,7 @@ struct ArtLayersPanelView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityLabel("Перейменувати шар")
+                                .accessibilityLabel(AppLocalization.t("Перейменувати шар", "Rename layer"))
                                 VStack(spacing: 2) {
                                     Button { onMoveLayerTowardFront(index) } label: {
                                         Image(systemName: "chevron.up")
@@ -308,13 +319,17 @@ struct ArtLayersPanelView: View {
                                         .foregroundStyle(isVisible(layer.id) ? Color.primary : Color.secondary)
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityLabel(isVisible(layer.id) ? "Приховати шар" : "Показати шар")
+                                .accessibilityLabel(
+                                    isVisible(layer.id)
+                                    ? AppLocalization.t("Приховати шар", "Hide layer")
+                                    : AppLocalization.t("Показати шар", "Show layer")
+                                )
                                 Button { onDeleteLayer(layer) } label: {
                                     Image(systemName: "trash")
                                         .foregroundStyle(.red.opacity(0.85))
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityLabel("Видалити шар")
+                                .accessibilityLabel(AppLocalization.t("Видалити шар", "Delete layer"))
                             }
                             .padding(.horizontal, 8)
                             .padding(.vertical, 6)
@@ -454,7 +469,11 @@ struct ToolDockContentView: View {
                             )
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Колір \(idx + 1)")
+                    .accessibilityLabel(
+                        AppLocalization.isUkrainian
+                        ? "Колір \(idx + 1)"
+                        : "Color \(idx + 1)"
+                    )
                 }
 
                 ColorPicker(
@@ -472,11 +491,11 @@ struct ToolDockContentView: View {
 
                 Menu {
                     Picker(
-                        "Стиль",
+                        AppLocalization.t("Стиль", "Style"),
                         selection: Binding(get: { drawingStyle }, set: onDrawingStyleChanged)
                     ) {
                         ForEach(DrawingStyle.allCases) { style in
-                            Text(style.rawValue).tag(style)
+                            Text(style.title).tag(style)
                         }
                     }
                 } label: {
@@ -493,7 +512,7 @@ struct ToolDockContentView: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Стиль штриха")
+                .accessibilityLabel(AppLocalization.t("Стиль штриха", "Stroke style"))
             }
             .padding(.horizontal, 2)
             .padding(.vertical, 4)
@@ -502,10 +521,14 @@ struct ToolDockContentView: View {
 
     private var strokeSettingsPopoverContent: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Перо")
+            Text(AppLocalization.t("Перо", "Pen"))
                 .font(.subheadline.weight(.semibold))
             VStack(alignment: .leading, spacing: 6) {
-                Text("Товщина \(Int(drawingWidth))")
+                Text(
+                    AppLocalization.isUkrainian
+                    ? "Товщина \(Int(drawingWidth))"
+                    : "Width \(Int(drawingWidth))"
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Slider(
@@ -515,7 +538,11 @@ struct ToolDockContentView: View {
                 )
             }
             VStack(alignment: .leading, spacing: 6) {
-                Text("Непрозорість \(Int(drawingOpacity * 100))%")
+                Text(
+                    AppLocalization.isUkrainian
+                    ? "Непрозорість \(Int(drawingOpacity * 100))%"
+                    : "Opacity \(Int(drawingOpacity * 100))%"
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Slider(
@@ -523,7 +550,7 @@ struct ToolDockContentView: View {
                     in: 0.05...1,
                     step: 0.05
                 )
-                .accessibilityLabel("Непрозорість")
+                .accessibilityLabel(AppLocalization.t("Непрозорість", "Opacity"))
             }
         }
         .padding(16)

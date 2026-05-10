@@ -11,6 +11,8 @@ struct EditorCompositeCanvasLayer: View {
     let hiddenStrokeIds: Set<UUID>
     let importedTextLines: [ImportedTextLine]
     let hiddenTextLineIds: Set<UUID>
+    let importedImageItems: [ImportedImageItem]
+    let hiddenImageItemIds: Set<UUID>
     let hiddenArtLayerIds: Set<UUID>
     let searchQuery: String
     let selectedTextLineIds: Set<UUID>
@@ -55,6 +57,16 @@ struct EditorCompositeCanvasLayer: View {
                 visibleLinesByLayer[line.layerId, default: []].append(line)
             }
 
+            var visibleImagesByLayer: [UUID: [ImportedImageItem]] = [:]
+            visibleImagesByLayer.reserveCapacity(orderedVisibleLayerIds.count)
+            for item in importedImageItems {
+                let bounds = CGRect(origin: item.position, size: item.size)
+                guard !hiddenImageItemIds.contains(item.id),
+                      visibleLayerIdSet.contains(item.layerId),
+                      bounds.intersects(visibleContent) else { continue }
+                visibleImagesByLayer[item.layerId, default: []].append(item)
+            }
+
             var visibleStrokesByLayer: [UUID: [StrokeItem]] = [:]
             visibleStrokesByLayer.reserveCapacity(orderedVisibleLayerIds.count)
             for stroke in strokes {
@@ -67,6 +79,18 @@ struct EditorCompositeCanvasLayer: View {
             }
 
             for layerId in orderedVisibleLayerIds {
+                for item in visibleImagesByLayer[layerId] ?? [] {
+                    guard let uiImage = UIImage(data: item.imageData) else { continue }
+                    let origin = EditorCanvasHelpers.contentToView(item.position, scale: scale, offset: offset)
+                    let rect = CGRect(
+                        x: origin.x,
+                        y: origin.y,
+                        width: item.size.width * scale,
+                        height: item.size.height * scale
+                    )
+                    context.draw(Image(uiImage: uiImage), in: rect)
+                }
+
                 for line in visibleLinesByLayer[layerId] ?? [] {
                     let renderedText: Text = hasSearch
                         ? EditorCanvasHelpers.highlightedText(line, query: searchQuery)

@@ -20,6 +20,8 @@ struct ContentView: View {
 
     @State private var importedTextLines: [ImportedTextLine] = []
     @State private var hiddenTextLineIds: Set<UUID> = []
+    @State private var importedImageItems: [ImportedImageItem] = []
+    @State private var hiddenImageItemIds: Set<UUID> = []
     @State private var artLayers: [CanvasArtLayer] = []
     @State private var activeLayerId: UUID = UUID()
     @State private var hiddenArtLayerIds: Set<UUID> = []
@@ -29,6 +31,7 @@ struct ContentView: View {
     @State private var selectedCanvasLayerIds: Set<String> = []
     @State private var draggingTextLineId: UUID?
     @State private var draggingStrokeId: UUID?
+    @State private var draggingImageItemId: UUID?
     @State private var resizingCanvasItem = false
     /// Однопальцеве пересування всього полотна (порожній фон), без зміни вмісту.
     @State private var fingerPanningCanvas = false
@@ -72,6 +75,7 @@ struct ContentView: View {
     @State private var exportDefaultFilename = "Canvas.png"
     @State private var exportErrorMessage: String?
     @State private var showCanvasSettings = false
+    @State private var showBiblePassagePanel = false
     @State private var canvasBackground: CanvasBackgroundKind = .dots
     @AppStorage("settings.pencilTap2Action") private var pencilTap2ActionRaw = PencilTapShortcutAction.selectTextTool.rawValue
     @AppStorage("settings.fingerTap2Action") private var fingerTap2ActionRaw = PencilTapShortcutAction.undo.rawValue
@@ -91,6 +95,12 @@ struct ContentView: View {
     private let previewLiveRenderTextLineLimit = 1800
     /// Ширина плаваючої колонки інструментів і слоїв (зверху зліва).
     private let toolDockFloatingColumnWidth: CGFloat = 280
+    /// Ширина бічної панелі Біблії (частка екрана, з обмеженням — вужча за попередній варіант).
+    private func bibleDrawerColumnWidth(totalWidth: CGFloat) -> CGFloat {
+        guard totalWidth > 1 else { return 276 }
+        let fraction = totalWidth * 0.38
+        return min(304, max(248, fraction))
+    }
     private static let docxUTType: UTType = UTType("org.openxmlformats.wordprocessingml.document")
         ?? UTType(filenameExtension: "docx")
         ?? .data
@@ -114,22 +124,36 @@ struct ContentView: View {
         editorWithNavigation(geo: geo)
     }
 
-    private func editorMainLayout(geo: GeometryProxy) -> some View {
-        canvasStack(size: geo.size)
-    }
-
     private func editorWithSpatialChrome(geo: GeometryProxy) -> some View {
-        editorMainLayout(geo: geo)
-            .coordinateSpace(name: EditorCanvasCoordinateSpace.name)
-            .overlay(alignment: .topTrailing) { editorTopTrailingChrome }
-            .overlay(alignment: .topLeading) { editorFloatingToolsAndLayers(geo: geo) }
-            .overlay { editorTextCompositionOverlays(geo: geo) }
+        let drawerW = showBiblePassagePanel ? bibleDrawerColumnWidth(totalWidth: geo.size.width) : 0
+        let canvasW = max(1, geo.size.width - drawerW)
+        let canvasSize = CGSize(width: canvasW, height: geo.size.height)
+
+        return HStack(spacing: 0) {
+            ZStack {
+                canvasStack(size: canvasSize)
+                    .coordinateSpace(name: EditorCanvasCoordinateSpace.name)
+                editorFloatingToolsAndLayers(canvasSize: canvasSize)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                editorTextCompositionOverlays(canvasSize: canvasSize)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                editorTopTrailingChromeOverlay(canvasSize: canvasSize)
+            }
+            .frame(width: canvasW, height: geo.size.height)
+
+            if showBiblePassagePanel {
+                biblePassageSidebar(width: drawerW, height: geo.size.height)
+            }
+        }
+        .frame(width: geo.size.width, height: geo.size.height)
     }
 
-    private var editorTopTrailingChrome: some View {
+    @ViewBuilder
+    private func editorTopTrailingChromeOverlay(canvasSize: CGSize) -> some View {
         VStack(alignment: .trailing, spacing: 10) {
             HStack(spacing: 10) {
                 ImportButtonView(showImportPicker: $showImportPicker)
+                addBiblePassageButton
                 ExportMenuButtonView(exportKinds: CanvasExportKind.allCases, onSelect: requestExport)
                 canvasSettingsButton
             }
@@ -137,12 +161,13 @@ struct ContentView: View {
         }
         .padding(.top, 12)
         .padding(.trailing, 12)
+        .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topTrailing)
     }
 
     @ViewBuilder
-    private func editorFloatingToolsAndLayers(geo: GeometryProxy) -> some View {
-        let w = min(toolDockFloatingColumnWidth, geo.size.width - 20)
-        let listH = min(320, geo.size.height * 0.42)
+    private func editorFloatingToolsAndLayers(canvasSize: CGSize) -> some View {
+        let w = min(toolDockFloatingColumnWidth, canvasSize.width - 20)
+        let listH = min(320, canvasSize.height * 0.42)
         VStack(alignment: .leading, spacing: 10) {
             toolDockContent(paletteMaxWidth: w)
             layersPanelOverlay(panelWidth: w, listMaxHeight: listH)
@@ -152,23 +177,34 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func editorTextCompositionOverlays(geo: GeometryProxy) -> some View {
+    private func editorTextCompositionOverlays(canvasSize: CGSize) -> some View {
         if editingTextLineId != nil {
-            editTextLineOverlay(size: geo.size)
+            editTextLineOverlay(size: canvasSize)
         }
         if isComposingNewText {
-            composingTextInlineOverlay(size: geo.size)
+            composingTextInlineOverlay(size: canvasSize)
         }
         if editingTextLineId == nil, !isComposingNewText {
-            selectedCanvasActionsOverlay(size: geo.size)
+            selectedCanvasActionsOverlay(size: canvasSize)
         }
     }
 
     private func editorWithFileAndObservers(geo: GeometryProxy) -> some View {
         editorWithSpatialChrome(geo: geo)
-            .fileImporter(isPresented: $showImportPicker, allowedContentTypes: [Self.docxUTType], allowsMultipleSelection: false) { result in
-                guard case .success(let urls) = result, let url = urls.first else { return }
-                importDOCX(from: url)
+            .fileImporter(isPresented: $showImportPicker, allowedContentTypes: [Self.docxUTType, .image], allowsMultipleSelection: true) { result in
+                guard case .success(let urls) = result, !urls.isEmpty else { return }
+                let docxURL = urls.first { $0.pathExtension.lowercased() == "docx" }
+                let imageURLs = urls.filter { url in
+                    let ext = url.pathExtension.lowercased()
+                    return ["png", "jpg", "jpeg", "heic", "heif", "webp", "gif", "bmp", "tif", "tiff"].contains(ext)
+                }
+                if let docxURL {
+                    importDOCX(from: docxURL)
+                    return
+                }
+                if !imageURLs.isEmpty {
+                    importImages(from: imageURLs)
+                }
             }
             .fileExporter(
                 isPresented: $showExportPicker,
@@ -180,13 +216,13 @@ struct ContentView: View {
                     exportErrorMessage = error.localizedDescription
                 }
             }
-            .alert("Експорт не вдався", isPresented: Binding(
+            .alert(AppLocalization.t("Експорт не вдався", "Export failed"), isPresented: Binding(
                 get: { exportErrorMessage != nil },
                 set: { if !$0 { exportErrorMessage = nil } }
             )) {
                 Button("OK", role: .cancel) { exportErrorMessage = nil }
             } message: {
-                Text(exportErrorMessage ?? "Спробуй ще раз.")
+                Text(exportErrorMessage ?? AppLocalization.t("Спробуй ще раз.", "Try again."))
             }
             .onAppear {
                 if let meta = projectStore.metadata(for: projectId) {
@@ -200,6 +236,7 @@ struct ContentView: View {
             .onChange(of: offset) { _ in markCanvasStateDirty(updatePreview: false) }
             .onChange(of: hiddenStrokeIds) { _ in markCanvasStateDirty(updatePreview: true) }
             .onChange(of: hiddenTextLineIds) { _ in markCanvasStateDirty(updatePreview: true) }
+            .onChange(of: hiddenImageItemIds) { _ in markCanvasStateDirty(updatePreview: true) }
             .onChange(of: artLayers) { _ in markCanvasStateDirty(updatePreview: true) }
             .onChange(of: activeLayerId) { _ in markCanvasStateDirty(updatePreview: false) }
             .onChange(of: hiddenArtLayerIds) { _ in markCanvasStateDirty(updatePreview: true) }
@@ -212,7 +249,7 @@ struct ContentView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    TextField("Назва", text: $projectTitle)
+                    TextField(AppLocalization.t("Назва", "Title"), text: $projectTitle)
                         .multilineTextAlignment(.center)
                         .submitLabel(.done)
                         .onSubmit { projectStore.renameProject(id: projectId, title: projectTitle) }
@@ -227,6 +264,54 @@ struct ContentView: View {
             }
     }
 
+    private func setBiblePassagePanelVisible(_ visible: Bool) {
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.88)) {
+            showBiblePassagePanel = visible
+        }
+    }
+
+    @ViewBuilder
+    private func biblePassageSidebar(width: CGFloat, height: CGFloat) -> some View {
+        BiblePassageInsertSheet(
+            onClose: { setBiblePassagePanelVisible(false) },
+            onInsert: { resolved in
+                insertBiblePassage(resolved)
+            }
+        )
+        .frame(width: width, height: height)
+        .background(Color(UIColor.systemBackground), in: biblePassageDrawerShape)
+        .clipShape(biblePassageDrawerShape)
+        .overlay {
+            biblePassageDrawerShape.stroke(Color(UIColor.separator).opacity(0.35), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 10, x: -4, y: 0)
+        .transition(.move(edge: .trailing).combined(with: .opacity))
+    }
+
+    private var biblePassageDrawerShape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: 14,
+            bottomLeadingRadius: 14,
+            bottomTrailingRadius: 0,
+            topTrailingRadius: 0,
+            style: .continuous
+        )
+    }
+
+    private var addBiblePassageButton: some View {
+        Button {
+            setBiblePassagePanelVisible(!showBiblePassagePanel)
+        } label: {
+            Image(systemName: showBiblePassagePanel ? "text.book.closed.fill" : "text.book.closed")
+                .font(.system(size: 18, weight: .semibold))
+                .frame(width: 40, height: 40)
+                .background(Color(UIColor.systemBackground), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(UIColor.separator).opacity(0.3), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(AppLocalization.t("Додати біблійний уривок", "Add Bible passage"))
+    }
+
     private var renameArtLayerSheetPresented: Binding<Bool> {
         Binding(
             get: { renameArtLayerId != nil },
@@ -237,18 +322,18 @@ struct ContentView: View {
     private var renameArtLayerSheet: some View {
         NavigationStack {
             Form {
-                TextField("Назва шару", text: $renameArtLayerDraft)
+                TextField(AppLocalization.t("Назва шару", "Layer name"), text: $renameArtLayerDraft)
                     .submitLabel(.done)
                     .onSubmit { commitRenameArtLayer() }
             }
-            .navigationTitle("Шар")
+            .navigationTitle(AppLocalization.t("Шар", "Layer"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Скасувати") { renameArtLayerId = nil }
+                    Button(AppLocalization.t("Скасувати", "Cancel")) { renameArtLayerId = nil }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Готово") { commitRenameArtLayer() }
+                    Button(AppLocalization.t("Готово", "Done")) { commitRenameArtLayer() }
                 }
             }
         }
@@ -283,6 +368,9 @@ struct ContentView: View {
         }
         .frame(width: size.width, height: size.height)
         .clipped()
+        .dropDestination(for: String.self) { items, location in
+            handleBibleTextDrop(items: items, location: location)
+        }
     }
 
     @ViewBuilder
@@ -385,7 +473,7 @@ struct ContentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(UIColor.separator).opacity(0.3), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Налаштування канви")
+        .accessibilityLabel(AppLocalization.t("Налаштування канви", "Canvas settings"))
         .popover(isPresented: $showCanvasSettings) { canvasSettingsPopoverContent }
     }
 
@@ -400,11 +488,11 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
             }
-            .navigationTitle("Налаштування")
+            .navigationTitle(AppLocalization.t("Налаштування", "Settings"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Готово") { showCanvasSettings = false }
+                    Button(AppLocalization.t("Готово", "Done")) { showCanvasSettings = false }
                 }
             }
         }
@@ -414,7 +502,7 @@ struct ContentView: View {
 
     private var canvasBackgroundSettingsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Фон канви")
+            Text(AppLocalization.t("Фон канви", "Canvas background"))
                 .font(.subheadline.weight(.semibold))
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 ForEach(CanvasBackgroundKind.allCases) { kind in
@@ -455,17 +543,17 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Apple Pencil")
                 .font(.subheadline.weight(.semibold))
-            PencilTapActionRow(title: "2 тапи олівцем", selection: pencilTap2ActionBinding)
+            PencilTapActionRow(title: AppLocalization.t("2 тапи олівцем", "2 pencil taps"), selection: pencilTap2ActionBinding)
         }
     }
 
     private var interactionSettingsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Interaction")
+            Text(AppLocalization.t("Взаємодія", "Interaction"))
                 .font(.subheadline.weight(.semibold))
-            PencilTapActionRow(title: "2 пальці: 1 тап", selection: fingerTap2ActionBinding)
-            PencilTapActionRow(title: "3 пальці: 1 тап", selection: fingerTap3ActionBinding)
-            PencilTapActionRow(title: "4 пальці: 1 тап", selection: fingerTap4ActionBinding)
+            PencilTapActionRow(title: AppLocalization.t("2 пальці: 1 тап", "2 fingers: 1 tap"), selection: fingerTap2ActionBinding)
+            PencilTapActionRow(title: AppLocalization.t("3 пальці: 1 тап", "3 fingers: 1 tap"), selection: fingerTap3ActionBinding)
+            PencilTapActionRow(title: AppLocalization.t("4 пальці: 1 тап", "4 fingers: 1 tap"), selection: fingerTap4ActionBinding)
         }
     }
 
@@ -568,6 +656,8 @@ struct ContentView: View {
             hiddenStrokeIds: hiddenStrokeIds,
             importedTextLines: importedTextLines,
             hiddenTextLineIds: hiddenTextLineIds,
+            importedImageItems: importedImageItems,
+            hiddenImageItemIds: hiddenImageItemIds,
             hiddenArtLayerIds: hiddenArtLayerIds,
             searchQuery: searchQuery,
             selectedTextLineIds: selectedTextLineIds,
@@ -796,6 +886,7 @@ struct ContentView: View {
                     if isPointInsideSelectedCanvasItems(cp) {
                         draggingStrokeId = nil
                         draggingTextLineId = nil
+                        draggingImageItemId = nil
                         hasCapturedTextDragUndo = false
                         return
                     }
@@ -806,6 +897,11 @@ struct ContentView: View {
                     }
                     if case .text(let id)? = selectedCanvasItem, textContainsPoint(id: id, point: cp) {
                         draggingTextLineId = id
+                        hasCapturedTextDragUndo = false
+                        return
+                    }
+                    if case .image(let id)? = selectedCanvasItem, imageContainsPoint(id: id, point: cp) {
+                        draggingImageItemId = id
                         hasCapturedTextDragUndo = false
                         return
                     }
@@ -859,6 +955,10 @@ struct ContentView: View {
                         moveText(id: dragId, delta: t)
                         return
                     }
+                    if let dragId = draggingImageItemId {
+                        moveImage(id: dragId, delta: t)
+                        return
+                    }
                     return
                 }
                 if interactionMode == .draw {
@@ -901,6 +1001,7 @@ struct ContentView: View {
                 textSelectionRect = nil
                 draggingTextLineId = nil
                 draggingStrokeId = nil
+                draggingImageItemId = nil
                 resizingCanvasItem = false
                 hasCapturedTextDragUndo = false
                 fingerPanningCanvas = false
@@ -1001,8 +1102,8 @@ struct ContentView: View {
                     .background(Color.white)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 HStack {
-                    Button("Зберегти") { commitEditingTextLine() }
-                    Button("Скасувати") { editingTextLineId = nil; editingTextLineText = "" }.foregroundStyle(.red)
+                    Button(AppLocalization.t("Зберегти", "Save")) { commitEditingTextLine() }
+                    Button(AppLocalization.t("Скасувати", "Cancel")) { editingTextLineId = nil; editingTextLineText = "" }.foregroundStyle(.red)
                 }
             }
             .padding(10)
@@ -1029,8 +1130,8 @@ struct ContentView: View {
                     .frame(width: w, height: 52)
                     .background(Color.white.opacity(0.001))
                 HStack(spacing: 10) {
-                    Button("Вставити") { commitComposingText() }
-                    Button("Скасувати") { cancelComposingText() }.foregroundStyle(.red)
+                    Button(AppLocalization.t("Вставити", "Insert")) { commitComposingText() }
+                    Button(AppLocalization.t("Скасувати", "Cancel")) { cancelComposingText() }.foregroundStyle(.red)
                 }
                 .font(.caption)
             }
@@ -1051,7 +1152,7 @@ struct ContentView: View {
                 Button(role: .destructive) {
                     deleteSelectedCanvasSelection()
                 } label: {
-                    Label("Видалити", systemImage: "trash")
+                    Label(AppLocalization.t("Видалити", "Delete"), systemImage: "trash")
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
@@ -1060,7 +1161,7 @@ struct ContentView: View {
                     Button {
                         startEditingFirstSelectedTextLine()
                     } label: {
-                        Label("Редагувати", systemImage: "pencil")
+                        Label(AppLocalization.t("Редагувати", "Edit"), systemImage: "pencil")
                             .font(.caption.weight(.semibold))
                     }
                     .buttonStyle(.borderedProminent)
@@ -1111,6 +1212,64 @@ struct ContentView: View {
         markCanvasStateDirty(updatePreview: true)
     }
 
+    private func insertBiblePassage(_ passage: BiblePassageResolved) {
+        guard !passage.lines.isEmpty else { return }
+        insertBibleTextBlock(title: passage.title, lines: passage.lines)
+    }
+
+    private func insertBibleTextBlock(title: String?, lines: [String], anchorInView: CGPoint = CGPoint(x: 24, y: 120)) {
+        guard !lines.isEmpty else { return }
+        let documentId = UUID()
+        let groupId = UUID()
+        let topLeft = viewToContent(anchorInView)
+        var y = topLeft.y
+        var order = 0
+        var imported: [ImportedTextLine] = []
+
+        let chunks = (title.map { [$0] } ?? []) + lines
+        for chunk in chunks {
+            for text in wrapText(chunk, maxChars: 64) {
+                imported.append(
+                    ImportedTextLine(
+                        documentId: documentId,
+                        groupId: groupId,
+                        order: order,
+                        layerId: activeLayerId,
+                        text: text,
+                        position: CGPoint(x: topLeft.x, y: y),
+                        fontSize: 18,
+                        color: .black
+                    )
+                )
+                y += 24
+                order += 1
+            }
+            y += 8
+        }
+
+        guard !imported.isEmpty else { return }
+        pushUndoSnapshot()
+        importedTextLines.append(contentsOf: imported)
+        selectedTextLineId = imported.first?.id
+        selectedTextLineIds = Set(imported.map(\.id))
+        selectedCanvasLayerIds = Set(imported.map(canvasSelectionId(forTextLine:)))
+        syncPrimarySelectionFromSet()
+        markCanvasStateDirty(updatePreview: true)
+    }
+
+    private func handleBibleTextDrop(items: [String], location: CGPoint) -> Bool {
+        let rawLines = items
+            .flatMap { text in
+                text
+                    .split(separator: "\n", omittingEmptySubsequences: false)
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            }
+        guard !rawLines.isEmpty else { return false }
+        insertBibleTextBlock(title: nil, lines: rawLines, anchorInView: location)
+        return true
+    }
+
     private func requestExport(_ kind: CanvasExportKind) {
         let snapshot = CanvasExportSnapshot(
             background: canvasBackground,
@@ -1119,7 +1278,9 @@ struct ContentView: View {
             strokes: strokes,
             hiddenStrokeIds: hiddenStrokeIds,
             textLines: importedTextLines,
-            hiddenTextLineIds: hiddenTextLineIds
+            hiddenTextLineIds: hiddenTextLineIds,
+            imageItems: importedImageItems,
+            hiddenImageItemIds: hiddenImageItemIds
         )
         guard let data = CanvasExportRenderer.data(for: kind, snapshot: snapshot) else {
             exportErrorMessage = "Канва порожня або формат не підтримується."
@@ -1168,6 +1329,49 @@ struct ContentView: View {
         }
         if !current.isEmpty { lines.append(current) }
         return lines
+    }
+
+    private func importImages(from urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        var addedItems: [ImportedImageItem] = []
+        let start = viewToContent(CGPoint(x: 36, y: 160))
+        var yOffset: CGFloat = 0
+
+        for url in urls {
+            let access = url.startAccessingSecurityScopedResource()
+            defer {
+                if access { url.stopAccessingSecurityScopedResource() }
+            }
+            guard let data = try? Data(contentsOf: url),
+                  let image = UIImage(data: data) else { continue }
+            guard let normalizedData = image.pngData() else { continue }
+            let original = image.size
+            guard original.width > 0, original.height > 0 else { continue }
+            let maxSide: CGFloat = 520
+            let ratio = min(maxSide / max(original.width, original.height), 1)
+            let size = CGSize(
+                width: max(40, original.width * ratio),
+                height: max(40, original.height * ratio)
+            )
+            addedItems.append(
+                ImportedImageItem(
+                    layerId: activeLayerId,
+                    imageData: normalizedData,
+                    position: CGPoint(x: start.x, y: start.y + yOffset),
+                    size: size
+                )
+            )
+            yOffset += size.height + 24
+        }
+
+        guard !addedItems.isEmpty else { return }
+        pushUndoSnapshot()
+        importedImageItems.append(contentsOf: addedItems)
+        selectedCanvasLayerIds = Set(addedItems.map(canvasSelectionId(forImage:)))
+        selectedTextLineId = nil
+        selectedTextLineIds = []
+        syncPrimarySelectionFromSet()
+        markCanvasStateDirty(updatePreview: true)
     }
 
     private func textLineAt(contentPoint: CGPoint) -> ImportedTextLine? {
@@ -1228,6 +1432,7 @@ struct ContentView: View {
 
         let selectedStrokeIds = selectedStrokeIdsFromCanvasSelection()
         let selectedLineIdsForDeletion = selectedTextLineIdsFromCanvasSelection()
+        let selectedImageIds = selectedImageIdsFromCanvasSelection()
 
         if !selectedStrokeIds.isEmpty {
             strokes.removeAll { selectedStrokeIds.contains($0.id) }
@@ -1236,6 +1441,10 @@ struct ContentView: View {
         if !selectedLineIdsForDeletion.isEmpty {
             importedTextLines.removeAll { selectedLineIdsForDeletion.contains($0.id) }
             hiddenTextLineIds.subtract(selectedLineIdsForDeletion)
+        }
+        if !selectedImageIds.isEmpty {
+            importedImageItems.removeAll { selectedImageIds.contains($0.id) }
+            hiddenImageItemIds.subtract(selectedImageIds)
         }
         markCanvasStateDirty(updatePreview: true)
 
@@ -1387,6 +1596,10 @@ struct ContentView: View {
         "textline-\(line.id.uuidString)"
     }
 
+    private func canvasSelectionId(forImage item: ImportedImageItem) -> String {
+        "image-\(item.id.uuidString)"
+    }
+
     private func selectedStrokeIdsFromCanvasSelection() -> Set<UUID> {
         Set(selectedCanvasLayerIds.compactMap { id -> UUID? in
             guard id.hasPrefix("stroke-") else { return nil }
@@ -1411,6 +1624,13 @@ struct ContentView: View {
             }
         }
         return result
+    }
+
+    private func selectedImageIdsFromCanvasSelection() -> Set<UUID> {
+        Set(selectedCanvasLayerIds.compactMap { id -> UUID? in
+            guard id.hasPrefix("image-") else { return nil }
+            return UUID(uuidString: id.replacingOccurrences(of: "image-", with: ""))
+        })
     }
 
     private func normalizeFragmentOrder() {
@@ -1450,6 +1670,13 @@ struct ContentView: View {
             selectedTextLineIds = [line.id]
             return
         }
+        if let image = imageItemAt(contentPoint: contentPoint) {
+            selectedCanvasItem = .image(image.id)
+            selectedCanvasLayerIds = [canvasSelectionId(forImage: image)]
+            selectedTextLineId = nil
+            selectedTextLineIds = []
+            return
+        }
         if let stroke = strokeAt(contentPoint: contentPoint) {
             selectedCanvasItem = .stroke(stroke.id)
             selectedCanvasLayerIds = [canvasSelectionId(for: stroke)]
@@ -1479,11 +1706,24 @@ struct ContentView: View {
         return nil
     }
 
+    private func imageItemAt(contentPoint: CGPoint) -> ImportedImageItem? {
+        for artLayer in artLayers.reversed() {
+            if hiddenArtLayerIds.contains(artLayer.id) { continue }
+            for item in importedImageItems.reversed() where item.layerId == artLayer.id && !hiddenImageItemIds.contains(item.id) {
+                if CGRect(origin: item.position, size: item.size).contains(contentPoint) {
+                    return item
+                }
+            }
+        }
+        return nil
+    }
+
     private func selectedCanvasItemBounds() -> CGRect? {
         let layerIds = selectedCanvasLayerIds
         if !layerIds.isEmpty {
             let selectedStrokeIds = selectedStrokeIdsFromCanvasSelection()
             let selectedTextLineIds = selectedTextLineIdsFromCanvasSelection()
+            let selectedImageIds = selectedImageIdsFromCanvasSelection()
             let rects: [CGRect] =
                 strokes.compactMap { stroke in
                     guard selectedStrokeIds.contains(stroke.id),
@@ -1496,6 +1736,12 @@ struct ContentView: View {
                           !hiddenTextLineIds.contains(line.id),
                           !hiddenArtLayerIds.contains(line.layerId) else { return nil }
                     return boundsForTextLine(line)
+                } +
+                importedImageItems.compactMap { item in
+                    guard selectedImageIds.contains(item.id),
+                          !hiddenImageItemIds.contains(item.id),
+                          !hiddenArtLayerIds.contains(item.layerId) else { return nil }
+                    return CGRect(origin: item.position, size: item.size)
                 }
             guard let first = rects.first else { return nil }
             return rects.dropFirst().reduce(first) { $0.union($1) }
@@ -1508,6 +1754,9 @@ struct ContentView: View {
         case .text(let id):
             guard let line = importedTextLines.first(where: { $0.id == id }) else { return nil }
             return boundsForTextLine(line)
+        case .image(let id):
+            guard let item = importedImageItems.first(where: { $0.id == id }) else { return nil }
+            return CGRect(origin: item.position, size: item.size)
         }
     }
 
@@ -1535,6 +1784,11 @@ struct ContentView: View {
         return boundsForTextLine(line).contains(point)
     }
 
+    private func imageContainsPoint(id: UUID, point: CGPoint) -> Bool {
+        guard let item = importedImageItems.first(where: { $0.id == id }) else { return false }
+        return CGRect(origin: item.position, size: item.size).contains(point)
+    }
+
     private func moveStroke(id: UUID, delta: CGSize) {
         guard let index = strokes.firstIndex(where: { $0.id == id }) else { return }
         let dx = delta.width / scale
@@ -1554,6 +1808,17 @@ struct ContentView: View {
         markCanvasStateDirty(updatePreview: true)
     }
 
+    private func moveImage(id: UUID, delta: CGSize) {
+        guard let index = importedImageItems.firstIndex(where: { $0.id == id }) else { return }
+        let dx = delta.width / scale
+        let dy = delta.height / scale
+        importedImageItems[index].position = CGPoint(
+            x: importedImageItems[index].position.x + dx,
+            y: importedImageItems[index].position.y + dy
+        )
+        markCanvasStateDirty(updatePreview: true)
+    }
+
     private func resizeSelectedCanvasItem(delta: CGSize) {
         let amount = (delta.width + delta.height) / 220
         let factor = (1 + amount).clamped(to: 0.4...2.2)
@@ -1569,6 +1834,22 @@ struct ContentView: View {
         case .text(let id):
             guard let index = importedTextLines.firstIndex(where: { $0.id == id }) else { return }
             importedTextLines[index].fontSize = (importedTextLines[index].fontSize * factor).clamped(to: 8...120)
+        case .image(let id):
+            guard let index = importedImageItems.firstIndex(where: { $0.id == id }) else { return }
+            let oldSize = importedImageItems[index].size
+            let center = CGPoint(
+                x: importedImageItems[index].position.x + oldSize.width / 2,
+                y: importedImageItems[index].position.y + oldSize.height / 2
+            )
+            let newSize = CGSize(
+                width: (oldSize.width * factor).clamped(to: 24...8000),
+                height: (oldSize.height * factor).clamped(to: 24...8000)
+            )
+            importedImageItems[index].size = newSize
+            importedImageItems[index].position = CGPoint(
+                x: center.x - newSize.width / 2,
+                y: center.y - newSize.height / 2
+            )
         case nil:
             return
         }
@@ -1581,6 +1862,8 @@ struct ContentView: View {
             return strokeBounds(stroke.points)
         case .text(let line):
             return boundsForTextLine(line)
+        case .image(let item):
+            return CGRect(origin: item.position, size: item.size)
         }
     }
 
@@ -1593,10 +1876,14 @@ struct ContentView: View {
         let pickedTextLines = importedTextLines
             .filter { !hiddenTextLineIds.contains($0.id) && !hiddenArtLayerIds.contains($0.layerId) }
             .filter { boundsForTextLine($0).intersects(rect) }
+        let pickedImageItems = importedImageItems
+            .filter { !hiddenImageItemIds.contains($0.id) && !hiddenArtLayerIds.contains($0.layerId) }
+            .filter { CGRect(origin: $0.position, size: $0.size).intersects(rect) }
 
         let strokeLayerIds = pickedStrokeIds.map { "stroke-\($0.uuidString)" }
         let textLayerIds = pickedTextLines.map(canvasSelectionId(forTextLine:))
-        selectedCanvasLayerIds = Set(strokeLayerIds + textLayerIds)
+        let imageLayerIds = pickedImageItems.map(canvasSelectionId(forImage:))
+        selectedCanvasLayerIds = Set(strokeLayerIds + textLayerIds + imageLayerIds)
         selectedTextLineIds = Set(pickedTextLines.map(\.id))
         selectedTextLineId = pickedTextLines.first?.id
         syncPrimarySelectionFromSet()
@@ -1614,11 +1901,20 @@ struct ContentView: View {
             return true
         }
         let selectedTextLineIds = selectedTextLineIdsFromCanvasSelection()
-        return importedTextLines.contains(where: {
+        if importedTextLines.contains(where: {
             selectedTextLineIds.contains($0.id) &&
             !hiddenTextLineIds.contains($0.id) &&
             !hiddenArtLayerIds.contains($0.layerId) &&
             boundsForTextLine($0).contains(point)
+        }) {
+            return true
+        }
+        let selectedImageIds = selectedImageIdsFromCanvasSelection()
+        return importedImageItems.contains(where: {
+            selectedImageIds.contains($0.id) &&
+            !hiddenImageItemIds.contains($0.id) &&
+            !hiddenArtLayerIds.contains($0.layerId) &&
+            CGRect(origin: $0.position, size: $0.size).contains(point)
         })
     }
 
@@ -1627,6 +1923,7 @@ struct ContentView: View {
         let dy = delta.height / scale
         let selectedStrokeIds = selectedStrokeIdsFromCanvasSelection()
         let selectedTextLineIds = selectedTextLineIdsFromCanvasSelection()
+        let selectedImageIds = selectedImageIdsFromCanvasSelection()
         for i in strokes.indices {
             guard selectedStrokeIds.contains(strokes[i].id) else { continue }
             strokes[i].points = strokes[i].points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
@@ -1634,6 +1931,13 @@ struct ContentView: View {
         for i in importedTextLines.indices {
             guard selectedTextLineIds.contains(importedTextLines[i].id) else { continue }
             importedTextLines[i].position = CGPoint(x: importedTextLines[i].position.x + dx, y: importedTextLines[i].position.y + dy)
+        }
+        for i in importedImageItems.indices {
+            guard selectedImageIds.contains(importedImageItems[i].id) else { continue }
+            importedImageItems[i].position = CGPoint(
+                x: importedImageItems[i].position.x + dx,
+                y: importedImageItems[i].position.y + dy
+            )
         }
         markCanvasStateDirty(updatePreview: true)
     }
@@ -1645,6 +1949,7 @@ struct ContentView: View {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         let selectedStrokeIds = selectedStrokeIdsFromCanvasSelection()
         let selectedTextLineIds = selectedTextLineIdsFromCanvasSelection()
+        let selectedImageIds = selectedImageIdsFromCanvasSelection()
 
         for i in strokes.indices {
             guard selectedStrokeIds.contains(strokes[i].id) else { continue }
@@ -1660,6 +1965,26 @@ struct ContentView: View {
                 y: center.y + (importedTextLines[i].position.y - center.y) * factor
             )
             importedTextLines[i].fontSize = (importedTextLines[i].fontSize * factor).clamped(to: 8...120)
+        }
+        for i in importedImageItems.indices {
+            guard selectedImageIds.contains(importedImageItems[i].id) else { continue }
+            let itemCenter = CGPoint(
+                x: importedImageItems[i].position.x + importedImageItems[i].size.width / 2,
+                y: importedImageItems[i].position.y + importedImageItems[i].size.height / 2
+            )
+            let scaledCenter = CGPoint(
+                x: center.x + (itemCenter.x - center.x) * factor,
+                y: center.y + (itemCenter.y - center.y) * factor
+            )
+            let newSize = CGSize(
+                width: (importedImageItems[i].size.width * factor).clamped(to: 24...8000),
+                height: (importedImageItems[i].size.height * factor).clamped(to: 24...8000)
+            )
+            importedImageItems[i].size = newSize
+            importedImageItems[i].position = CGPoint(
+                x: scaledCenter.x - newSize.width / 2,
+                y: scaledCenter.y - newSize.height / 2
+            )
         }
         syncPrimarySelectionFromSet()
         markCanvasStateDirty(updatePreview: true)
@@ -1738,6 +2063,10 @@ struct ContentView: View {
             }
             return
         }
+        if let uuid = UUID(uuidString: id.replacingOccurrences(of: "image-", with: "")), id.hasPrefix("image-") {
+            selectedCanvasItem = importedImageItems.contains(where: { $0.id == uuid }) ? .image(uuid) : nil
+            return
+        }
         selectedCanvasItem = nil
     }
 
@@ -1793,6 +2122,7 @@ struct ContentView: View {
         CanvasSnapshot(
             strokes: strokes,
             importedTextLines: importedTextLines,
+            importedImageItems: importedImageItems,
             artLayers: artLayers,
             activeLayerId: activeLayerId,
             hiddenArtLayerIds: hiddenArtLayerIds
@@ -1819,11 +2149,13 @@ struct ContentView: View {
     private func apply(snapshot: CanvasSnapshot) {
         strokes = snapshot.strokes
         importedTextLines = snapshot.importedTextLines
+        importedImageItems = snapshot.importedImageItems
         artLayers = snapshot.artLayers
         activeLayerId = snapshot.activeLayerId
         hiddenArtLayerIds = snapshot.hiddenArtLayerIds
         hiddenStrokeIds = hiddenStrokeIds.intersection(Set(strokes.map(\.id)))
         hiddenTextLineIds = hiddenTextLineIds.intersection(Set(importedTextLines.map(\.id)))
+        hiddenImageItemIds = hiddenImageItemIds.intersection(Set(importedImageItems.map(\.id)))
         sanitizeArtLayers()
         currentStroke = []
         selectedTextLineId = nil
@@ -1835,6 +2167,7 @@ struct ContentView: View {
         composingTextPosition = nil
         draggingTextLineId = nil
         draggingStrokeId = nil
+        draggingImageItemId = nil
         resizingCanvasItem = false
         selectedCanvasItem = nil
         selectedCanvasLayerIds = []
@@ -1964,12 +2297,13 @@ struct ContentView: View {
 
     private var canvasLayers: [CanvasLayer] {
         let strokeLayers = strokes.map(CanvasLayer.stroke)
+        let imageLayers = importedImageItems.map(CanvasLayer.image)
         let textLayers = Dictionary(grouping: importedTextLines, by: \.documentId)
             .values
             .compactMap { lines in
                 lines.sorted { $0.order < $1.order }.first.map(CanvasLayer.text)
             }
-        return strokeLayers + textLayers
+        return strokeLayers + imageLayers + textLayers
     }
 
     private func isRenderableCanvasLayer(_ layer: CanvasLayer) -> Bool {
@@ -1980,6 +2314,8 @@ struct ContentView: View {
             guard !hiddenArtLayerIds.contains(line.layerId) else { return false }
             let docIds = importedTextLines.filter { $0.documentId == line.documentId }.map(\.id)
             return !docIds.allSatisfy { hiddenTextLineIds.contains($0) }
+        case .image(let item):
+            return !hiddenImageItemIds.contains(item.id) && !hiddenArtLayerIds.contains(item.layerId)
         }
     }
 
@@ -2006,10 +2342,15 @@ struct ContentView: View {
         for i in importedTextLines.indices where !validLayerIds.contains(importedTextLines[i].layerId) {
             importedTextLines[i].layerId = fallback
         }
+        for i in importedImageItems.indices where !validLayerIds.contains(importedImageItems[i].layerId) {
+            importedImageItems[i].layerId = fallback
+        }
         hiddenStrokeIds = hiddenStrokeIds.intersection(Set(strokes.map(\.id)))
         hiddenTextLineIds = hiddenTextLineIds.intersection(Set(importedTextLines.map(\.id)))
+        hiddenImageItemIds = hiddenImageItemIds.intersection(Set(importedImageItems.map(\.id)))
         let validIds = Set(strokes.map(canvasSelectionId(for:))) 
             .union(importedTextLines.map(canvasSelectionId(forTextLine:)))
+            .union(importedImageItems.map(canvasSelectionId(forImage:)))
         selectedCanvasLayerIds = selectedCanvasLayerIds.intersection(validIds)
         if let selected = selectedCanvasItem {
             switch selected {
@@ -2017,6 +2358,8 @@ struct ContentView: View {
                 if !strokes.contains(where: { $0.id == id }) { selectedCanvasItem = nil }
             case .text(let id):
                 if !importedTextLines.contains(where: { $0.id == id }) { selectedCanvasItem = nil }
+            case .image(let id):
+                if !importedImageItems.contains(where: { $0.id == id }) { selectedCanvasItem = nil }
             }
         }
         if selectedCanvasItem == nil { syncPrimarySelectionFromSet() }
@@ -2039,6 +2382,7 @@ struct ContentView: View {
         let removedId = layer.id
         strokes.removeAll { $0.layerId == removedId }
         importedTextLines.removeAll { $0.layerId == removedId }
+        importedImageItems.removeAll { $0.layerId == removedId }
 
         if artLayers.count == 1 {
             // Для останнього шару видалення має реально очищати канву.
@@ -2092,6 +2436,8 @@ struct ContentView: View {
             hiddenStrokeIds: Array(hiddenStrokeIds),
             importedTextLines: importedTextLines.map(ImportedTextLineDTO.init),
             hiddenTextLineIds: Array(hiddenTextLineIds),
+            importedImageItems: importedImageItems.map(ImportedImageItemDTO.init),
+            hiddenImageItemIds: Array(hiddenImageItemIds),
             layerGroups: [],
             customLayerNames: [:],
             toolDockPlacement: nil,
@@ -2147,6 +2493,8 @@ struct ContentView: View {
         hiddenStrokeIds = Set(state.hiddenStrokeIds)
         importedTextLines = state.importedTextLines.map { $0.importedTextLine(fallbackLayerId: fallback) }
         hiddenTextLineIds = Set(state.hiddenTextLineIds)
+        importedImageItems = (state.importedImageItems ?? []).map { $0.importedImageItem(fallbackLayerId: fallback) }
+        hiddenImageItemIds = Set(state.hiddenImageItemIds ?? [])
         if let aid = state.activeLayerId, loadedArt.contains(where: { $0.id == aid }) {
             activeLayerId = aid
         } else {
@@ -2157,6 +2505,522 @@ struct ContentView: View {
         sanitizeArtLayers()
         isCanvasStateDirty = false
         isPreviewDirty = false
+    }
+}
+
+private struct BiblePassageInsertSheet: View {
+    let onClose: () -> Void
+    let onInsert: (BiblePassageResolved) -> Void
+
+    @ObservedObject private var store = CanvasProjectStore.shared
+    @State private var selectedTranslationId: String = ""
+    @State private var books: [BibleBookOption] = []
+    @State private var selectedBookId: String = ""
+    @State private var chapter: Int = 1
+    @State private var chapterVerses: [BibleVerseOption] = []
+    @State private var selectedVerseNumbers: Set<Int> = []
+    @State private var isLoadingBooks = false
+    @State private var isLoadingChapter = false
+    @State private var isInserting = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text(AppLocalization.t("Додати уривок", "Add passage"))
+                    .font(.headline)
+                Spacer()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+
+            if let errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
+
+            Divider()
+
+            topBooksAndChaptersSection
+                .frame(height: 158)
+                .background(Color(UIColor.secondarySystemGroupedBackground))
+
+            Divider()
+
+            versesMainSection
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+
+            translationBottomSection
+                .padding(.horizontal, 10)
+                .padding(.vertical, 10)
+                .background(Color(UIColor.secondarySystemGroupedBackground))
+        }
+        .onAppear {
+            bootstrapSelection()
+        }
+        .onChange(of: selectedTranslationId) { _, _ in
+            Task { await loadBooksAndChapterForCurrentTranslation() }
+        }
+        .onChange(of: selectedBookId) { _, _ in
+            Task { await loadChapterVerses() }
+        }
+        .onChange(of: chapter) { _, _ in
+            Task { await loadChapterVerses() }
+        }
+    }
+
+    private var allTranslations: [BibleTranslationSeed] {
+        BibleLibraryCatalog.availableTranslations
+            .filter { BibleLibrarySeeder.isAddedToCanvases(translation: $0, store: store) }
+            .sorted { lhs, rhs in
+                let lLang = BibleLibraryCatalog.languageTitle(for: lhs.languageId)
+                let rLang = BibleLibraryCatalog.languageTitle(for: rhs.languageId)
+                if lLang != rLang { return lLang < rLang }
+                return lhs.title < rhs.title
+            }
+    }
+
+    private var selectedTranslation: BibleTranslationSeed? {
+        allTranslations.first(where: { $0.id == selectedTranslationId })
+    }
+
+    private var selectedBookChapterCount: Int {
+        books.first(where: { $0.id == selectedBookId })?.chapterCount ?? 1
+    }
+
+    private var canInsert: Bool {
+        selectedTranslation != nil && !selectedBookId.isEmpty && !selectedVerseNumbers.isEmpty
+    }
+
+    private var selectedBookTitle: String {
+        books.first(where: { $0.id == selectedBookId })?.title ?? ""
+    }
+
+    private var chapterNumbers: [Int] {
+        Array(1...max(1, selectedBookChapterCount))
+    }
+
+    private var selectedVerseLines: [String] {
+        let selected = chapterVerses.filter { selectedVerseNumbers.contains($0.number) }.sorted { $0.number < $1.number }
+        return selected.map { "\($0.number). \($0.text)" }
+    }
+
+    private var dragPayload: String {
+        selectedVerseLines.joined(separator: "\n")
+    }
+
+    private var topBooksAndChaptersSection: some View {
+        Group {
+            if isLoadingBooks {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text(AppLocalization.t("Завантажую структуру книги...", "Loading books..."))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack(alignment: .top, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(AppLocalization.t("Книги", "Books"))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.top, 8)
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 4) {
+                                ForEach(books) { book in
+                                    Button {
+                                        selectedBookId = book.id
+                                        chapter = 1
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Text(shortBookTitle(book.title))
+                                                .font(.caption)
+                                                .foregroundStyle(.primary)
+                                                .lineLimit(1)
+                                            Spacer(minLength: 0)
+                                            Text("\(book.chapterCount)")
+                                                .font(.caption2.weight(.semibold))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 6)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                .fill(selectedBookId == book.id ? Color.accentColor.opacity(0.14) : Color.clear)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(book.title)
+                                }
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.bottom, 6)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(AppLocalization.t("Розділи", "Chapters"))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 8)
+                        ScrollView {
+                            LazyVStack(alignment: .center, spacing: 4) {
+                                ForEach(chapterNumbers, id: \.self) { number in
+                                    Button {
+                                        chapter = number
+                                    } label: {
+                                        Text("\(number)")
+                                            .font(.caption.weight(.medium))
+                                            .foregroundStyle(.primary)
+                                            .frame(width: 40, height: 28)
+                                            .background(
+                                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                    .fill(chapter == number ? Color.accentColor.opacity(0.14) : Color.clear)
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 4)
+                            .padding(.bottom, 6)
+                        }
+                    }
+                    .frame(width: 56)
+                }
+            }
+        }
+    }
+
+    private var versesMainSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text("\(selectedBookTitle) \(chapter)")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if !chapterVerses.isEmpty {
+                    Button(AppLocalization.t("Весь розділ", "Whole chapter")) {
+                        selectedVerseNumbers = Set(chapterVerses.map(\.number))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+
+            Group {
+                if isLoadingChapter {
+                    Spacer(minLength: 0)
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text(AppLocalization.t("Завантажую розділ...", "Loading chapter..."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    Spacer(minLength: 0)
+                } else if chapterVerses.isEmpty {
+                    Spacer(minLength: 0)
+                    Text(AppLocalization.t("Обери книгу і розділ, щоб побачити текст.", "Select a book and chapter to see text."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                    Spacer(minLength: 0)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 6) {
+                            ForEach(chapterVerses) { verse in
+                                verseRow(verse)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 8)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+                .padding(.top, 4)
+
+            HStack(spacing: 6) {
+                Text(
+                    AppLocalization.isUkrainian
+                    ? "Вибрано: \(selectedVerseNumbers.count)"
+                    : "Selected: \(selectedVerseNumbers.count)"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if !selectedVerseLines.isEmpty {
+                    Text(AppLocalization.t("На канву", "To canvas"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "hand.draw")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .draggable(dragPayload) {
+                            BibleVersesDragPreview(lines: selectedVerseLines)
+                        }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+        }
+        .background(Color(UIColor.systemBackground))
+    }
+
+    private var translationBottomSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(AppLocalization.t("Переклад", "Translation"))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Picker(selection: $selectedTranslationId) {
+                ForEach(allTranslations) { translation in
+                    let lang = BibleLibraryCatalog.languageTitle(for: translation.languageId)
+                    Text("\(lang) — \(translation.abbreviation)").tag(translation.id)
+                }
+            } label: {
+                EmptyView()
+            }
+            .pickerStyle(.menu)
+            .accessibilityLabel(AppLocalization.t("Переклад", "Translation"))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func verseRow(_ verse: BibleVerseOption) -> some View {
+        let isSelected = selectedVerseNumbers.contains(verse.number)
+        let singleVersePayload = "\(verse.number). \(verse.text)"
+        let payload = (isSelected && !selectedVerseLines.isEmpty) ? dragPayload : singleVersePayload
+        let previewLines = dragPreviewLines(for: verse, isSelected: isSelected)
+        return HStack(alignment: .top, spacing: 10) {
+            Button {
+                toggleVerse(verse.number)
+            } label: {
+                HStack(alignment: .top, spacing: 10) {
+                    Text("\(verse.number)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                    Text(verse.text)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(isSelected ? Color.accentColor.opacity(0.16) : Color(UIColor.secondarySystemBackground))
+                )
+            }
+            .buttonStyle(.plain)
+            .draggable(payload) {
+                BibleVersesDragPreview(lines: previewLines)
+            }
+        }
+    }
+
+    private func dragPreviewLines(for verse: BibleVerseOption, isSelected: Bool) -> [String] {
+        if isSelected && !selectedVerseLines.isEmpty {
+            return selectedVerseLines
+        }
+        return ["\(verse.number). \(verse.text)"]
+    }
+
+    private func toggleVerse(_ number: Int) {
+        if selectedVerseNumbers.contains(number) {
+            selectedVerseNumbers.remove(number)
+        } else {
+            selectedVerseNumbers.insert(number)
+        }
+    }
+
+    private func shortBookTitle(_ title: String) -> String {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 14 else { return trimmed }
+
+        let words = trimmed.split(whereSeparator: { $0.isWhitespace || $0 == "-" || $0 == "–" })
+        guard !words.isEmpty else { return trimmed }
+
+        if let first = words.first, Int(first) != nil, words.count >= 2 {
+            let second = String(words[1].prefix(4))
+            return "\(first) \(second)."
+        }
+
+        if words.count >= 2 {
+            let first = String(words[0].prefix(4))
+            let second = String(words[1].prefix(4))
+            return "\(first). \(second)."
+        }
+
+        return String(trimmed.prefix(12)) + "…"
+    }
+
+    private func bootstrapSelection() {
+        refreshTranslationSelection()
+        Task { await loadBooksAndChapterForCurrentTranslation() }
+    }
+
+    private func refreshTranslationSelection() {
+        let options = allTranslations
+        if !options.contains(where: { $0.id == selectedTranslationId }) {
+            selectedTranslationId = options.first?.id ?? ""
+        }
+    }
+
+    @MainActor
+    private func loadBooksAndChapterForCurrentTranslation() async {
+        guard let selectedTranslation else {
+            books = []
+            selectedBookId = ""
+            chapterVerses = []
+            selectedVerseNumbers = []
+            return
+        }
+        isLoadingBooks = true
+        errorMessage = nil
+        do {
+            let loadedBooks = try await BiblePassageService.books(for: selectedTranslation)
+            books = loadedBooks
+            if !books.contains(where: { $0.id == selectedBookId }) {
+                selectedBookId = books.first?.id ?? ""
+            }
+            chapter = min(max(1, chapter), max(1, selectedBookChapterCount))
+            await loadChapterVerses()
+        } catch {
+            books = []
+            selectedBookId = ""
+            chapterVerses = []
+            selectedVerseNumbers = []
+            errorMessage = AppLocalization.isUkrainian
+                ? "Не вдалося завантажити книги: \(error.localizedDescription)"
+                : "Failed to load books: \(error.localizedDescription)"
+        }
+        isLoadingBooks = false
+    }
+
+    @MainActor
+    private func loadChapterVerses() async {
+        guard let translation = selectedTranslation,
+              let bookIndex = Int(selectedBookId),
+              bookIndex >= 0 else {
+            chapterVerses = []
+            selectedVerseNumbers = []
+            return
+        }
+        isLoadingChapter = true
+        errorMessage = nil
+        do {
+            chapterVerses = try await BiblePassageService.chapterVerses(
+                translation: translation,
+                bookIndex: bookIndex,
+                chapterNumber: chapter
+            )
+            selectedVerseNumbers = []
+        } catch {
+            chapterVerses = []
+            selectedVerseNumbers = []
+            errorMessage = AppLocalization.isUkrainian
+                ? "Не вдалося завантажити розділ: \(error.localizedDescription)"
+                : "Failed to load chapter: \(error.localizedDescription)"
+        }
+        isLoadingChapter = false
+    }
+
+    private func insertSelectedVerses() {
+        guard let translation = selectedTranslation else { return }
+        guard let bookIndex = Int(selectedBookId), bookIndex >= 0 else { return }
+        let sorted = selectedVerseNumbers.sorted()
+        guard let verseFrom = sorted.first else { return }
+        let verseTo = sorted.last
+
+        isInserting = true
+        errorMessage = nil
+        Task {
+            do {
+                let passage = try await BiblePassageService.resolvePassage(
+                    translation: translation,
+                    bookIndex: bookIndex,
+                    chapterNumber: chapter,
+                    verseStart: verseFrom,
+                    verseEnd: verseTo
+                )
+                await MainActor.run {
+                    onInsert(passage)
+                    isInserting = false
+                    onClose()
+                }
+            } catch {
+                await MainActor.run {
+                    isInserting = false
+                    errorMessage = AppLocalization.isUkrainian
+                        ? "Не вдалося сформувати уривок: \(error.localizedDescription)"
+                        : "Failed to build passage: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+}
+
+private struct BibleVersesDragPreview: View {
+    let lines: [String]
+
+    var body: some View {
+        let previewLines = Array(lines.prefix(4))
+        let remainingCount = max(0, lines.count - previewLines.count)
+
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(previewLines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+            }
+            if remainingCount > 0 {
+                Text(AppLocalization.isUkrainian ? "ще \(remainingCount)..." : "\(remainingCount) more...")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color(UIColor.separator).opacity(0.35), lineWidth: 1)
+        )
+        .frame(maxWidth: 260, alignment: .leading)
     }
 }
 

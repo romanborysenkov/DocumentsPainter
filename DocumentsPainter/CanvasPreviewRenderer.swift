@@ -21,6 +21,7 @@ enum CanvasPreviewRenderer {
         }
         let strokes = state.strokes.map { $0.strokeItem(fallbackLayerId: fallback) }
         let lines = state.importedTextLines.map { $0.importedTextLine(fallbackLayerId: fallback) }
+        let images = (state.importedImageItems ?? []).map { $0.importedImageItem(fallbackLayerId: fallback) }
         var bounds = CGRect.null
         for s in strokes {
             for p in s.points {
@@ -30,6 +31,9 @@ enum CanvasPreviewRenderer {
         for l in lines {
             let w = (l.text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: l.fontSize)]).width
             bounds = bounds.union(CGRect(x: l.position.x, y: l.position.y, width: max(1, w), height: l.fontSize * 1.3))
+        }
+        for item in images {
+            bounds = bounds.union(CGRect(origin: item.position, size: item.size))
         }
         if bounds.isNull || bounds.isEmpty {
             return nil
@@ -59,6 +63,10 @@ enum CanvasPreviewRenderer {
             for lid in artIds {
                 for line in lines where line.layerId == lid {
                     EditorCanvasHelpers.highlightedAttributedString(line).draw(at: line.position)
+                }
+                for item in images where item.layerId == lid {
+                    guard let image = UIImage(data: item.imageData) else { continue }
+                    image.draw(in: CGRect(origin: item.position, size: item.size))
                 }
                 for stroke in strokes where stroke.layerId == lid {
                     guard stroke.points.count > 1 else { continue }
